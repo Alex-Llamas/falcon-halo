@@ -202,15 +202,19 @@ def create_genes_dictionary(filepath, threshold):
     return filtered_values, unfiltered_values
 
 
-# --- Load Trait Descriptions ---
+# --- Load Trait Categories and Descriptions ---
 trait_desc_map = {}
+trait_cat_map = {}
 if os.path.exists(options.trait_descriptions):
     try:
         desc_df = pd.read_csv(options.trait_descriptions, sep='\t', header=None)
         for _, row in desc_df.iterrows():
-            if pd.notna(row[1]) and pd.notna(row[2]):
+            # row[1]: trait name, row[2]: description, row[4]: category
+            if len(row) > 2 and pd.notna(row[1]) and pd.notna(row[2]):
                 trait_desc_map[str(row[1]).strip()] = str(row[2]).strip()
-        print(f"[LOG] Loaded {len(trait_desc_map)} trait descriptions for NLP matching.")
+            if len(row) > 4 and pd.notna(row[1]) and pd.notna(row[4]):
+                trait_cat_map[str(row[1]).strip()] = str(row[4]).strip()
+        print(f"[LOG] Loaded {len(trait_desc_map)} descriptions and {len(trait_cat_map)} categories.")
     except Exception as e:
         print(f"[WARNING] Could not parse trait descriptions file: {e}")
 
@@ -262,10 +266,22 @@ meta_df['W_final'] = meta_df['W_red'] * meta_df['W_pow']
 trait_weights = dict(zip(meta_df['phenotype'], meta_df['W_final']))
 
 eigenvalues = scipy.linalg.eigh(dense_mat, eigvals_only=True)
+# Sort eigenvalues in descending order
+sorted_eigenvalues = np.sort(eigenvalues)[::-1]
+sum_eig = np.sum(sorted_eigenvalues)
+meff_thresholds = [0.90, 0.95, 0.995]
+meff_results = {}
+cumulative_eig = np.cumsum(sorted_eigenvalues)
+for c in meff_thresholds:
+    # Find minimum Meff such that (sum of first Meff eigenvalues) / (total sum) >= c
+    m_eff = np.where(cumulative_eig / sum_eig >= c)[0][0] + 1
+    meff_results[c] = m_eff
+    print(f"[LOG] Calculated Effective Traits (M_eff) for c={c}: {m_eff}")
+
 M = total_traits
 # Using the fractional metric for robustness as suggested in the definitions
 n_eff_alt = (np.sum(np.maximum(eigenvalues, 0)) ** 2) / np.sum(np.square(np.maximum(eigenvalues, 0)))
-print(f"[LOG] Calculated Effective Traits (N_eff): {n_eff_alt:.2f}")
+print(f"[LOG] Calculated Effective Traits (N_eff - fractional): {n_eff_alt:.2f}")
 
 # --- Extract Pairwise Clinical and Effector Pair Maps ---
 print("\n[LOG] Parsing clinical trials and effector gene lists for pair matching...")
@@ -358,9 +374,11 @@ def evaluate_pair(gene, trait):
                 has_effector = True
                 break
 
-    is_novel = (pair_phase_rank == -1) and not has_effector
-    is_repurposable = (pair_phase_rank == -1) and (gene in approved_genes)
-    return pair_phase_rank, pair_phase_name, is_novel, is_repurposable, has_effector
+    is_clinical = (pair_phase_rank != -1)
+    is_novel = (not is_clinical) and (not has_effector)
+    # Repurposable pair: associated, no clinical trial for the pair, but gene has an approved clinical trial for a trait j' != j
+    is_repurposable = (not is_clinical) and (gene in approved_genes)
+    return pair_phase_rank, pair_phase_name, is_novel, is_repurposable, has_effector, is_clinical
 
 
 # --- Threshold & Prior Definitions ---
@@ -407,11 +425,14 @@ add_stat("Total_Traits", "Trait_stats", "Raw", "N/A", "N/A", "N/A", total_traits
 add_stat("Total_Loci", "Loci_stats", "Raw", "N/A", "N/A", "N/A", total_loci)
 add_stat("Total_Genes", "Gene_stats", "Raw", "N/A", "N/A", "N/A", TOTAL_HUMAN_GENES)
 add_stat("Effective_Traits", "Trait_stats", "Corr_adjusted", "N/A", "N/A", "N/A", n_eff_alt)
+for c, m_eff in meff_results.items():
+    add_stat("Effective_Traits", "Trait_stats", "Corr_adjusted", "N/A", "N/A", c, m_eff)
 
 precalculated_html_data = {}
 m_pie = dict(l=20, r=20, t=55, b=20)
 m_split = dict(l=40, r=20, t=45, b=35)
 
+top_dist_list = []
 for pr in priors:
     pr_str = str(pr)
     precalculated_html_data[pr_str] = {}
@@ -447,41 +468,72 @@ for pr in priors:
         clin_counts = {k: {'total': 0, 'novel': 0} for k in
                        ['NO TRIAL', 'PRECLINICAL', 'PHASE 1', 'PHASE 2', 'PHASE 3', 'APPROVAL']}
 
-        # Calculation of Raw and Adjusted Statistics
-        # G_raw_i: Genes per trait i
-        G_raw = {t: len(trait_genes.get(t, set())) for t in trait_names_list}
-        # G_adj_i: Adjusted genes per trait i
-        G_adj = {t: G_raw[t] * trait_weights.get(t, 0) for t in trait_names_list}
+        # Sets of pairs for top distributions
+        pairs_all = []
+        pairs_novel = []
+        pairs_clinical = []
+        pairs_repurposable = []
 
-        # T_raw_j: Traits per gene j
+        # Calculation of Raw and Adjusted Statistics
+        # G_raw_j: Genes per trait j
+        G_raw = {t: len(trait_genes.get(t, set())) for t in trait_names_list}
+        # G_adj_j: Adjusted genes per trait j
+        G_adj = {t: sum(1.0 * trait_weights.get(t, 0) for _ in trait_genes.get(t, set())) for t in trait_names_list}
+
+        # T_raw_i: Traits per gene i
         T_raw = {g: len(gene_traits.get(g, set())) for g in gene_traits}
-        # T_adj_j: Adjusted traits per gene j
+        # T_adj_i: Adjusted traits per gene i
         T_adj = {g: sum(trait_weights.get(t, 0) for t in gene_traits.get(g, set())) for g in gene_traits}
 
         novel_pairs_raw = 0
         novel_pairs_adj = 0
         novel_genes_per_trait = defaultdict(set)
+        novel_traits_per_gene = defaultdict(set)
+
         repurposable_pairs_raw = 0
         repurposable_pairs_adj = 0
+        repurposable_genes_per_trait = defaultdict(set)
+        repurposable_traits_per_gene = defaultdict(set)
 
         for g, traits in gene_traits.items():
             for t in traits:
-                p_rank, p_name, is_novel, is_repurposable, has_effector = evaluate_pair(g, t)
+                p_rank, p_name, is_novel, is_repurposable, has_effector, is_clinical = evaluate_pair(g, t)
 
                 clin_counts[p_name]['total'] += 1
                 w = trait_weights.get(t, 0)
+
+                pairs_all.append((g, t))
                 if is_novel:
                     clin_counts[p_name]['novel'] += 1
                     novel_pairs_raw += 1
                     novel_pairs_adj += w
                     novel_genes_per_trait[t].add(g)
+                    novel_traits_per_gene[g].add(t)
+                    pairs_novel.append((g, t))
                 if is_repurposable:
                     repurposable_pairs_raw += 1
                     repurposable_pairs_adj += w
+                    repurposable_genes_per_trait[t].add(g)
+                    repurposable_traits_per_gene[g].add(t)
+                    pairs_repurposable.append((g, t))
+                if is_clinical:
+                    pairs_clinical.append((g, t))
 
-        novel_genes_raw = len(set(g for traits in novel_genes_per_trait.values() for g in traits))
+        # NovAG_raw_j, NovAG_adj_j
         NovAG_raw = {t: len(novel_genes_per_trait.get(t, set())) for t in trait_names_list}
         NovAG_adj = {t: NovAG_raw[t] * trait_weights.get(t, 0) for t in trait_names_list}
+        # NovAT_raw_i, NovAT_adj_i
+        NovAT_raw = {g: len(novel_traits_per_gene.get(g, set())) for g in gene_traits}
+        NovAT_adj = {g: sum(trait_weights.get(t, 0) for t in novel_traits_per_gene.get(g, set())) for g in gene_traits}
+
+        # RepAG_raw_j, RepAG_adj_j
+        RepAG_raw = {t: len(repurposable_genes_per_trait.get(t, set())) for t in trait_names_list}
+        RepAG_adj = {t: RepAG_raw[t] * trait_weights.get(t, 0) for t in trait_names_list}
+        # RepAT_raw_i, RepAT_adj_i
+        RepAT_raw = {g: len(repurposable_traits_per_gene.get(g, set())) for g in gene_traits}
+        RepAT_adj = {g: sum(trait_weights.get(t, 0) for t in repurposable_traits_per_gene.get(g, set())) for g in gene_traits}
+
+        novel_genes_count_raw = len(set(g for traits in novel_genes_per_trait.values() for g in traits))
 
         total_assoc_pairs_raw = sum(G_raw.values())
         total_assoc_pairs_adj = sum(G_adj.values())
@@ -500,6 +552,38 @@ for pr in priors:
 
         avg_novel_genes_per_trait_raw = sum(NovAG_raw.values()) / total_traits
         avg_novel_genes_per_trait_adj = sum(NovAG_adj.values()) / total_traits
+
+        avg_novel_traits_per_gene_raw = sum(NovAT_raw.values()) / TOTAL_HUMAN_GENES
+        avg_novel_traits_per_gene_adj = sum(NovAT_adj.values()) / TOTAL_HUMAN_GENES
+
+        avg_repurposable_genes_per_trait_raw = sum(RepAG_raw.values()) / total_traits
+        avg_repurposable_genes_per_trait_adj = sum(RepAG_adj.values()) / total_traits
+
+        # Using 'l' in variable name to match the metric name string for consistency
+        avg_repurposablel_traits_per_gene_raw = sum(RepAT_raw.values()) / TOTAL_HUMAN_GENES
+        avg_repurposablel_traits_per_gene_adj = sum(RepAT_adj.values()) / TOTAL_HUMAN_GENES
+
+        # Top 3 Distributions
+        for p_list, p_type in [(pairs_all, "All"), (pairs_novel, "Novel"), (pairs_clinical, "Clinical trials"), (pairs_repurposable, "Repurposable")]:
+            g_counts = defaultdict(int)
+            t_counts = defaultdict(int)
+            cat_counts = defaultdict(int)
+            for g, t in p_list:
+                g_counts[g] += 1
+                t_counts[t] += 1
+                cat_name = trait_cat_map.get(t, "Unknown")
+                cat_counts[cat_name] += 1
+
+            top_g = sorted(g_counts.items(), key=lambda x: x[1], reverse=True)[:3]
+            top_t = sorted(t_counts.items(), key=lambda x: x[1], reverse=True)[:3]
+            top_cat = sorted(cat_counts.items(), key=lambda x: x[1], reverse=True)[:3]
+
+            for rank, (name, count) in enumerate(top_g, 1):
+                top_dist_list.append({"BayesFactor": cat, "Prior": pr_str, "Type": p_type, "Metric": "Gene", "Rank": rank, "Name": name, "Count": count})
+            for rank, (name, count) in enumerate(top_t, 1):
+                top_dist_list.append({"BayesFactor": cat, "Prior": pr_str, "Type": p_type, "Metric": "Trait", "Rank": rank, "Name": name, "Count": count})
+            for rank, (name, count) in enumerate(top_cat, 1):
+                top_dist_list.append({"BayesFactor": cat, "Prior": pr_str, "Type": p_type, "Metric": "Category", "Rank": rank, "Name": name, "Count": count})
 
         # HTML Plot generation payload
         plots = {
@@ -530,36 +614,63 @@ for pr in priors:
         add_stat("Top_Nearest_Gene_Loci", "Loci_stats", "Raw", cat, pr_str, cat_threshold, filt_true)
         add_stat("Total_Associated_Genes", "Gene_stats", "Raw", cat, pr_str, cat_threshold, num_associated_genes)
         add_stat("Genes_Single_Trait", "Gene_stats", "Raw", cat, pr_str, cat_threshold, list(T_raw.values()).count(1))
+
+        # Pleiotropic_Genes
         add_stat("Pleiotropic_Genes", "Gene_stats", "Raw", cat, pr_str, cat_threshold, pleiotropic_genes_raw)
-        add_stat("Pleiotropic_Genes", "Gene_stats", "Bias_adjusted", cat, pr_str, cat_threshold,
-                 pleiotropic_genes_adj)
+        add_stat("Pleiotropic_Genes", "Gene_stats", "Bias_adjusted", cat, pr_str, cat_threshold, pleiotropic_genes_adj)
+
+        # Avg_Traits_Per_Gene
         add_stat("Avg_Traits_Per_Gene", "Gene_stats", "Raw", cat, pr_str, cat_threshold, avg_traits_per_gene_raw)
-        add_stat("Avg_Traits_Per_Gene", "Gene_stats", "Bias_adjusted", cat, pr_str, cat_threshold,
-                 avg_traits_per_gene_adj)
-        add_stat("Total_Associated_Pairs", "Association_stats", "Raw", cat, pr_str, cat_threshold,
-                 total_assoc_pairs_raw)
-        add_stat("Total_Associated_Pairs", "Association_stats", "Bias_adjusted", cat, pr_str, cat_threshold,
-                 total_assoc_pairs_adj)
+        add_stat("Avg_Traits_Per_Gene", "Gene_stats", "Bias_adjusted", cat, pr_str, cat_threshold, avg_traits_per_gene_adj)
+
+        # Total_Associated_Pairs
+        add_stat("Total_Associated_Pairs", "Association_stats", "Raw", cat, pr_str, cat_threshold, total_assoc_pairs_raw)
+        add_stat("Total_Associated_Pairs", "Association_stats", "Bias_adjusted", cat, pr_str, cat_threshold, total_assoc_pairs_adj)
+
+        # Avg_Genes_Per_Trait
         add_stat("Avg_Genes_Per_Trait", "Trait_stats", "Raw", cat, pr_str, cat_threshold, avg_genes_per_trait_raw)
-        add_stat("Avg_Genes_Per_Trait", "Trait_stats", "Bias_adjusted", cat, pr_str, cat_threshold,
-                 avg_genes_per_trait_adj)
+        add_stat("Avg_Genes_Per_Trait", "Trait_stats", "Bias_adjusted", cat, pr_str, cat_threshold, avg_genes_per_trait_adj)
+
+        # Genetic_signal
         add_stat("Genetic_signal", "Trait_stats", "Raw", cat, pr_str, cat_threshold, genetic_signal_raw)
         add_stat("Genetic_signal", "Trait_stats", "Bias_adjusted", cat, pr_str, cat_threshold, genetic_signal_adj)
+
+        # Novel_Pairs_Discovered
         add_stat("Novel_Pairs_Discovered", "Clinical_n_novelty", "Raw", cat, pr_str, cat_threshold, novel_pairs_raw)
-        add_stat("Novel_Pairs_Discovered", "Clinical_n_novelty", "Bias_adjusted", cat, pr_str, cat_threshold,
-                 novel_pairs_adj)
-        add_stat("Novel_Genes_Discovered", "Gene_stats", "Raw", cat, pr_str, cat_threshold, novel_genes_raw)
-        add_stat("Avg_Novel_Genes_Per_Trait", "Clinical_n_novelty", "Raw", cat, pr_str, cat_threshold,
-                 avg_novel_genes_per_trait_raw)
-        add_stat("Avg_Novel_Genes_Per_Trait", "Clinical_n_novelty", "Bias_adjusted", cat, pr_str, cat_threshold,
-                 avg_novel_genes_per_trait_adj)
+        add_stat("Novel_Pairs_Discovered", "Clinical_n_novelty", "Bias_adjusted", cat, pr_str, cat_threshold, novel_pairs_adj)
+
+        # Novel_Genes_Discovered
+        add_stat("Novel_Genes_Discovered", "Gene_stats", "Raw", cat, pr_str, cat_threshold, novel_genes_count_raw)
+
+        # Avg_Novel_Genes_Per_Trait
+        add_stat("Avg_Novel_Genes_Per_Trait", "Clinical_n_novelty", "Raw", cat, pr_str, cat_threshold, avg_novel_genes_per_trait_raw)
+        add_stat("Avg_Novel_Genes_Per_Trait", "Clinical_n_novelty", "Bias_adjusted", cat, pr_str, cat_threshold, avg_novel_genes_per_trait_adj)
+
+        # Avg_Novel_Traits_Per_Gene
+        add_stat("Avg_Novel_Traits_Per_Gene", "Clinical_n_novelty", "Raw", cat, pr_str, cat_threshold, avg_novel_traits_per_gene_raw)
+        add_stat("Avg_Novel_Traits_Per_Gene", "Clinical_n_novelty", "Bias_adjusted", cat, pr_str, cat_threshold, avg_novel_traits_per_gene_adj)
+
+        # Repurposable_Pairs
         add_stat("Repurposable_Pairs", "Clinical_n_novelty", "Raw", cat, pr_str, cat_threshold, repurposable_pairs_raw)
         add_stat("Repurposable_Pairs", "Clinical_n_novelty", "Bias_adjusted", cat, pr_str, cat_threshold, repurposable_pairs_adj)
+
+        # Avg_Repurposable_Genes_Per_Trait
+        add_stat("Avg_Repurposable_Genes_Per_Trait", "Clinical_n_novelty", "Raw", cat, pr_str, cat_threshold, avg_repurposable_genes_per_trait_raw)
+        add_stat("Avg_Repurposable_Genes_Per_Trait", "Clinical_n_novelty", "Bias_adjusted", cat, pr_str, cat_threshold, avg_repurposable_genes_per_trait_adj)
+
+        # Avg_Repurposablel_Traits_Per_Gene
+        add_stat("Avg_Repurposablel_Traits_Per_Gene", "Clinical_n_novelty", "Raw", cat, pr_str, cat_threshold, avg_repurposablel_traits_per_gene_raw)
+        add_stat("Avg_Repurposablel_Traits_Per_Gene", "Clinical_n_novelty", "Bias_adjusted", cat, pr_str, cat_threshold, avg_repurposablel_traits_per_gene_adj)
 
 stats_df = pd.DataFrame(stats_list,
                         columns=["Metric_Name", "Type", "Correction", "cat", "pr_str", "Threshold", "Value"])
 stats_df.to_csv(options.output_tsv, sep='\t', index=False)
 print(f"[LOG] Statistics TSV saved to {options.output_tsv}")
+
+top_dist_df = pd.DataFrame(top_dist_list)
+top_dist_output = "gmap_top_distributions.tsv"
+top_dist_df.to_csv(top_dist_output, sep='\t', index=False)
+print(f"[LOG] Top distributions TSV saved to {top_dist_output}")
 
 js_data_str = json.dumps(precalculated_html_data)
 
