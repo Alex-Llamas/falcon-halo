@@ -15,6 +15,7 @@ parser = OptionParser("usage: %prog [options]")
 parser.add_option("", '--input', action='append', help="Input TSV file(s)")
 parser.add_option("", "--output_html", default="nature_figure.html", help="Output HTML filename")
 parser.add_option("", "--output_tsv", default="gmap_statistics.tsv", help="Output TSV filename")
+parser.add_option("", "--top_dist_output", default="gmap_top_distributions.tsv", help="Top distributions Output TSV filename")
 parser.add_option("", "--clinical",
                   default="/humgen/diabetes/loki/source/PEGS/paper/figures/figure_3/clinical_trials.csv",
                   help="Clinical trials CSV file")
@@ -408,6 +409,7 @@ for file_path in options.input:
     all_raw_data[t_name] = unfilt_dict
 
 total_loci = sum(len(clumps) for clumps in all_raw_data.values())
+total_loci_adj = sum(len(clumps) * trait_weights.get(t, 0) for t, clumps in all_raw_data.items())
 
 # --- Generate TSV Statistics Dictionary and Plot Payloads ---
 print("\n[LOG] Calculating threshold statistics and HTML graphs...")
@@ -443,21 +445,30 @@ for pr in priors:
 
         trait_genes = defaultdict(set)
         gene_traits = defaultdict(set)
-        filt_true, single_gene_loci = 0, 0
-        f_adjusted = []
+        filt_true_raw, filt_true_adj = 0, 0
+        single_gene_loci_raw, single_gene_loci_adj = 0, 0
+        f_adjusted_raw, f_adjusted_adj = [], []
 
         for t, clumps in all_raw_data.items():
+            tw = trait_weights.get(t, 0)
             for c, values_list in clumps.items():
                 vals = [v for v in values_list if (v[0] >= cat_threshold if op == ">=" else (
                     v[0] > cat_threshold if op == ">" else v[0] <= cat_threshold))]
                 if not vals: continue
 
                 sum_post = sum(v[0] for v in vals)
-                f_adjusted.append(np.clip(sum_post - (len(vals) * 0.05), 0, 25))
+                val_f = np.clip(sum_post - (len(vals) * 0.05), 0, 25)
+                f_adjusted_raw.append(val_f)
+                f_adjusted_adj.append(val_f * tw)
 
-                if len(vals) == 1: single_gene_loci += 1
+                if len(vals) == 1:
+                    single_gene_loci_raw += 1
+                    single_gene_loci_adj += tw
+
                 best_is_nearest = max(vals, key=lambda x: x[0])[1]
-                if best_is_nearest: filt_true += 1
+                if best_is_nearest:
+                    filt_true_raw += 1
+                    filt_true_adj += tw
 
                 for prob, is_nearest, gene in vals:
                     trait_genes[t].add(gene)
@@ -465,8 +476,10 @@ for pr in priors:
 
         num_associated_genes = len(gene_traits)
 
-        clin_counts = {k: {'total': 0, 'novel': 0} for k in
-                       ['NO TRIAL', 'PRECLINICAL', 'PHASE 1', 'PHASE 2', 'PHASE 3', 'APPROVAL']}
+        clin_counts_raw = {k: {'total': 0, 'novel': 0} for k in
+                           ['NO TRIAL', 'PRECLINICAL', 'PHASE 1', 'PHASE 2', 'PHASE 3', 'APPROVAL']}
+        clin_counts_adj = {k: {'total': 0, 'novel': 0} for k in
+                           ['NO TRIAL', 'PRECLINICAL', 'PHASE 1', 'PHASE 2', 'PHASE 3', 'APPROVAL']}
 
         # Sets of pairs for top distributions
         pairs_all = []
@@ -499,12 +512,14 @@ for pr in priors:
             for t in traits:
                 p_rank, p_name, is_novel, is_repurposable, has_effector, is_clinical = evaluate_pair(g, t)
 
-                clin_counts[p_name]['total'] += 1
                 w = trait_weights.get(t, 0)
+                clin_counts_raw[p_name]['total'] += 1
+                clin_counts_adj[p_name]['total'] += w
 
                 pairs_all.append((g, t))
                 if is_novel:
-                    clin_counts[p_name]['novel'] += 1
+                    clin_counts_raw[p_name]['novel'] += 1
+                    clin_counts_adj[p_name]['novel'] += w
                     novel_pairs_raw += 1
                     novel_pairs_adj += w
                     novel_genes_per_trait[t].add(g)
@@ -564,31 +579,35 @@ for pr in priors:
         avg_repurposablel_traits_per_gene_adj = sum(RepAT_adj.values()) / TOTAL_HUMAN_GENES
 
         # Top 3 Distributions
-        for p_list, p_type in [(pairs_all, "All"), (pairs_novel, "Novel"), (pairs_clinical, "Clinical trials"), (pairs_repurposable, "Repurposable")]:
-            g_counts = defaultdict(int)
-            t_counts = defaultdict(int)
-            cat_counts = defaultdict(int)
-            for g, t in p_list:
-                g_counts[g] += 1
-                t_counts[t] += 1
-                cat_name = trait_cat_map.get(t, "Unknown")
-                cat_counts[cat_name] += 1
+        for corr_type in ["Raw", "Bias_adjusted"]:
+            for p_list, p_type in [(pairs_all, "All"), (pairs_novel, "Novel"), (pairs_clinical, "Clinical trials"), (pairs_repurposable, "Repurposable")]:
+                g_counts = defaultdict(float)
+                t_counts = defaultdict(float)
+                cat_counts = defaultdict(float)
+                for g, t in p_list:
+                    w_top = 1.0 if corr_type == "Raw" else trait_weights.get(t, 0)
+                    g_counts[g] += w_top
+                    t_counts[t] += w_top
+                    cat_name = trait_cat_map.get(t, "Unknown")
+                    cat_counts[cat_name] += w_top
 
-            top_g = sorted(g_counts.items(), key=lambda x: x[1], reverse=True)[:3]
-            top_t = sorted(t_counts.items(), key=lambda x: x[1], reverse=True)[:3]
-            top_cat = sorted(cat_counts.items(), key=lambda x: x[1], reverse=True)[:3]
+                top_g = sorted(g_counts.items(), key=lambda x: x[1], reverse=True)[:3]
+                top_t = sorted(t_counts.items(), key=lambda x: x[1], reverse=True)[:3]
+                top_cat = sorted(cat_counts.items(), key=lambda x: x[1], reverse=True)[:3]
 
-            for rank, (name, count) in enumerate(top_g, 1):
-                top_dist_list.append({"BayesFactor": cat, "Prior": pr_str, "Type": p_type, "Metric": "Gene", "Rank": rank, "Name": name, "Count": count})
-            for rank, (name, count) in enumerate(top_t, 1):
-                top_dist_list.append({"BayesFactor": cat, "Prior": pr_str, "Type": p_type, "Metric": "Trait", "Rank": rank, "Name": name, "Count": count})
-            for rank, (name, count) in enumerate(top_cat, 1):
-                top_dist_list.append({"BayesFactor": cat, "Prior": pr_str, "Type": p_type, "Metric": "Category", "Rank": rank, "Name": name, "Count": count})
+                for rank, (name, count) in enumerate(top_g, 1):
+                    top_dist_list.append({"BayesFactor": cat, "Prior": pr_str, "Correction": corr_type, "Type": p_type, "Metric": "Gene", "Rank": rank, "Name": name, "Count": count})
+                for rank, (name, count) in enumerate(top_t, 1):
+                    top_dist_list.append({"BayesFactor": cat, "Prior": pr_str, "Correction": corr_type, "Type": p_type, "Metric": "Trait", "Rank": rank, "Name": name, "Count": count})
+                for rank, (name, count) in enumerate(top_cat, 1):
+                    top_dist_list.append({"BayesFactor": cat, "Prior": pr_str, "Correction": corr_type, "Type": p_type, "Metric": "Category", "Rank": rank, "Name": name, "Count": count})
 
         # HTML Plot generation payload
         plots = {
-            "plot_a": create_pie_of_pie_json(filt_true, total_loci - filt_true, m_pie,
+            "plot_a": create_pie_of_pie_json(filt_true_raw, total_loci - filt_true_raw, m_pie,
                                              f"<b>a</b> Evidence driving associations ({total_loci:,} loci)"),
+            "plot_a_eff": create_pie_of_pie_json(filt_true_adj, total_loci_adj - filt_true_adj, m_pie,
+                                                 f"<b>a</b> Evidence driving associations ({total_loci_adj:.1f} effective loci)"),
             "plot_b": create_histogram_json(list(T_raw.values()), "<b>b</b> Gene pleiotropy", "Traits Associated per Gene",
                                             m_split, fill_color='rgba(134, 193, 102, 0.5)'),
             "plot_b_eff": create_histogram_json(list(T_adj.values()), "<b>b</b> Effective Gene pleiotropy",
@@ -600,18 +619,27 @@ for pr in priors:
             "plot_c_eff": create_histogram_json(list(G_adj.values()), "<b>c</b> Effective Trait polygenicity",
                                                 "Effective Genes Associated per Trait", m_split,
                                                 fill_color='rgba(74, 136, 201, 0.5)'),
-            "plot_d_left": create_histogram_json(f_adjusted, "<b>d</b> Distribution of expected genes",
+            "plot_d_left": create_histogram_json(f_adjusted_raw, "<b>d</b> Distribution of expected genes",
                                                  "Expected Genes", m_split, fill_color='rgba(145, 82, 158, 0.5)',
                                                  line_color='rgb(145, 82, 158)'),
-            "plot_d_right": create_bar_json(clin_counts,
+            "plot_d_left_eff": create_histogram_json(f_adjusted_adj, "<b>d</b> Effective Distribution of expected genes",
+                                                     "Effective Expected Genes", m_split, fill_color='rgba(145, 82, 158, 0.5)',
+                                                     line_color='rgb(145, 82, 158)'),
+            "plot_d_right": create_bar_json(clin_counts_raw,
                                             f"<b>e</b> Clinical and novelty ({total_assoc_pairs_raw:,} pairs)",
                                             "Phase", m_split, fill_color='rgba(228, 123, 43, 0.5)',
-                                            line_color='rgb(228, 123, 43)')
+                                            line_color='rgb(228, 123, 43)'),
+            "plot_d_right_eff": create_bar_json(clin_counts_adj,
+                                                f"<b>e</b> Effective Clinical and novelty ({total_assoc_pairs_adj:.1f} effective pairs)",
+                                                "Phase", m_split, fill_color='rgba(228, 123, 43, 0.5)',
+                                                line_color='rgb(228, 123, 43)')
         }
-        precalculated_html_data[pr_str][cat] = {"plots": {k: json.loads(v) for k, v in plots.items()}}
+        precalculated_html_data[pr_str][cat] = {"plots": {k: json.loads(v) for k, v in plots.items()}, "threshold": cat_threshold}
 
-        add_stat("Single_Gene_Loci", "Loci_stats", "Raw", cat, pr_str, cat_threshold, single_gene_loci)
-        add_stat("Top_Nearest_Gene_Loci", "Loci_stats", "Raw", cat, pr_str, cat_threshold, filt_true)
+        add_stat("Single_Gene_Loci", "Loci_stats", "Raw", cat, pr_str, cat_threshold, single_gene_loci_raw)
+        add_stat("Single_Gene_Loci", "Loci_stats", "Bias_adjusted", cat, pr_str, cat_threshold, single_gene_loci_adj)
+        add_stat("Top_Nearest_Gene_Loci", "Loci_stats", "Raw", cat, pr_str, cat_threshold, filt_true_raw)
+        add_stat("Top_Nearest_Gene_Loci", "Loci_stats", "Bias_adjusted", cat, pr_str, cat_threshold, filt_true_adj)
         add_stat("Total_Associated_Genes", "Gene_stats", "Raw", cat, pr_str, cat_threshold, num_associated_genes)
         add_stat("Genes_Single_Trait", "Gene_stats", "Raw", cat, pr_str, cat_threshold, list(T_raw.values()).count(1))
 
@@ -668,9 +696,8 @@ stats_df.to_csv(options.output_tsv, sep='\t', index=False)
 print(f"[LOG] Statistics TSV saved to {options.output_tsv}")
 
 top_dist_df = pd.DataFrame(top_dist_list)
-top_dist_output = "gmap_top_distributions.tsv"
-top_dist_df.to_csv(top_dist_output, sep='\t', index=False)
-print(f"[LOG] Top distributions TSV saved to {top_dist_output}")
+top_dist_df.to_csv(options.top_dist_output, sep='\t', index=False)
+print(f"[LOG] Top distributions TSV saved to {options.top_dist_output}")
 
 js_data_str = json.dumps(precalculated_html_data)
 
@@ -699,6 +726,7 @@ html_template = f"""
     <div class="header-actions">
         <button onclick="downloadPDF()" class="download-btn" id="downloadBtn">Download Figure as PDF</button>
         <div class="control-panel" style="display: flex; align-items: center; gap: 15px;">
+            <div id="thresholdDisplay" style="font-size: 14px; font-weight: 600; color: #4b5563;">Threshold: --</div>
             <select id="priorDropdown" onchange="updateDashboard()" style="padding: 6px; border-radius: 4px;">
                 <option value="1.0">Prior: 1%</option>
                 <option value="5.0" selected>Prior: 5%</option>
@@ -749,9 +777,14 @@ html_template = f"""
             let currentData = precalcData[priorVal][category];
             if (!currentData) return;
 
+            if (currentData.threshold !== undefined) {{
+                document.getElementById('thresholdDisplay').innerText = "Threshold: " + currentData.threshold.toFixed(4);
+            }}
+
             let plots = currentData.plots;
 
-            if (plots['plot_a']) Plotly.react('plot_a', plots['plot_a'].data, plots['plot_a'].layout, {{displayModeBar: false}});
+            let p_a = countMode === 'effective' ? plots['plot_a_eff'] : plots['plot_a'];
+            if (p_a) Plotly.react('plot_a', p_a.data, p_a.layout, {{displayModeBar: false}});
 
             let p_b = countMode === 'effective' ? plots['plot_b_eff'] : plots['plot_b'];
             if (p_b) Plotly.react('plot_b', p_b.data, p_b.layout, {{displayModeBar: false}});
@@ -759,8 +792,11 @@ html_template = f"""
             let p_c = countMode === 'effective' ? plots['plot_c_eff'] : plots['plot_c'];
             if (p_c) Plotly.react('plot_c', p_c.data, p_c.layout, {{displayModeBar: false}});
 
-            if (plots['plot_d_left']) Plotly.react('plot_d_left', plots['plot_d_left'].data, plots['plot_d_left'].layout, {{displayModeBar: false}});
-            if (plots['plot_d_right']) Plotly.react('plot_d_right', plots['plot_d_right'].data, plots['plot_d_right'].layout, {{displayModeBar: false}});
+            let p_d_l = countMode === 'effective' ? plots['plot_d_left_eff'] : plots['plot_d_left'];
+            if (p_d_l) Plotly.react('plot_d_left', p_d_l.data, p_d_l.layout, {{displayModeBar: false}});
+
+            let p_d_r = countMode === 'effective' ? plots['plot_d_right_eff'] : plots['plot_d_right'];
+            if (p_d_r) Plotly.react('plot_d_right', p_d_r.data, p_d_r.layout, {{displayModeBar: false}});
         }}
 
         updateDashboard();
