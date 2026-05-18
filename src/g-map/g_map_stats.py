@@ -234,33 +234,18 @@ merged_n = meta_df['sample_size'].notna().sum()
 print(f"[LOG] Matched {merged_h2} / {total_traits} traits with Heritability data.")
 print(f"[LOG] Matched {merged_n} / {total_traits} traits with Sample Size data.")
 
-valid_samples = meta_df['sample_size'].dropna()
-med_N = valid_samples.median() if len(valid_samples) > 0 else 10000
+valid_h2 = meta_df['h2'].dropna()
+med_h2 = valid_h2.median() if len(valid_h2) > 0 else 0.1
+valid_N = meta_df['sample_size'].dropna()
+med_N = valid_N.median() if len(valid_N) > 0 else 10000
 
-BONFERRONI_P = 0.05 / 1370
-valid_w_pows = []
+meta_df['h2_imp'] = meta_df['h2'].fillna(med_h2)
+meta_df['N_imp'] = meta_df['sample_size'].fillna(med_N)
+meta_df['power'] = meta_df['N_imp'] * meta_df['h2_imp'].clip(lower=0)
+P_max = meta_df['power'].max()
+if P_max <= 0: P_max = 1.0
 
-for _, row in meta_df.iterrows():
-    n_val, h2_val, p_val = row['sample_size'], row['h2'], row['pValue']
-    if pd.notna(n_val) and pd.notna(h2_val) and pd.notna(p_val) and p_val <= BONFERRONI_P and h2_val > 0:
-        valid_w_pows.append(1.0 / max(math.log(1 + (n_val * h2_val)), 0.001))
-
-med_W_pow = np.median(valid_w_pows) if len(valid_w_pows) > 0 else 1.0
-
-w_pow_list = []
-for _, row in meta_df.iterrows():
-    n_val, h2_val, p_val = row['sample_size'], row['h2'], row['pValue']
-    if pd.isna(h2_val) and pd.isna(n_val):
-        w_pow = med_W_pow
-    elif pd.isna(n_val) and pd.notna(h2_val) and p_val <= BONFERRONI_P and h2_val > 0:
-        w_pow = 1.0 / max(math.log(1 + (med_N * h2_val)), 0.001)
-    elif pd.notna(p_val) and (p_val > BONFERRONI_P or h2_val <= 0):
-        w_pow = 1.0 / max(math.log(1 + (n_val if pd.notna(n_val) else med_N)), 0.001)
-    else:
-        w_pow = 1.0 / max(math.log(1 + (n_val * h2_val)), 0.001)
-    w_pow_list.append(w_pow)
-
-meta_df['W_pow'] = w_pow_list
+meta_df['W_pow'] = np.log(1 + meta_df['power']) / np.log(1 + P_max)
 
 dense_mat = np.eye(total_traits, dtype=np.float64)
 if options.corr and os.path.exists(options.corr):
@@ -274,10 +259,11 @@ if options.corr and os.path.exists(options.corr):
 squared_mat = np.square(dense_mat)
 meta_df['W_red'] = 1.0 / np.sum(squared_mat, axis=1)
 meta_df['W_final'] = meta_df['W_red'] * meta_df['W_pow']
-meta_df['W_norm'] = meta_df['W_final'] / meta_df['W_final'].sum()
-trait_weights = dict(zip(meta_df['phenotype'], meta_df['W_norm']))
+trait_weights = dict(zip(meta_df['phenotype'], meta_df['W_final']))
 
 eigenvalues = scipy.linalg.eigh(dense_mat, eigvals_only=True)
+M = total_traits
+# Using the fractional metric for robustness as suggested in the definitions
 n_eff_alt = (np.sum(np.maximum(eigenvalues, 0)) ** 2) / np.sum(np.square(np.maximum(eigenvalues, 0)))
 print(f"[LOG] Calculated Effective Traits (N_eff): {n_eff_alt:.2f}")
 
@@ -296,6 +282,7 @@ def get_phase_rank(p):
 
 
 gene_clin_map = defaultdict(list)
+approved_genes = set()
 if os.path.exists(options.clinical):
     clin_df = pd.read_csv(options.clinical)
     if 'Gene_Name' in clin_df.columns and 'Indication_Name' in clin_df.columns and 'Phase' in clin_df.columns:
@@ -305,6 +292,8 @@ if os.path.exists(options.clinical):
             p_rank, p_name = get_phase_rank(row['Phase'])
             if p_name and g != 'NAN' and ind != 'NAN':
                 gene_clin_map[g].append((ind, p_rank, p_name))
+                if p_rank == 4:
+                    approved_genes.add(g)
 
 gene_eff_map = defaultdict(set)
 if os.path.exists(options.effector_list):
@@ -370,7 +359,8 @@ def evaluate_pair(gene, trait):
                 break
 
     is_novel = (pair_phase_rank == -1) and not has_effector
-    return pair_phase_rank, pair_phase_name, is_novel
+    is_repurposable = (pair_phase_rank == -1) and (gene in approved_genes)
+    return pair_phase_rank, pair_phase_name, is_novel, is_repurposable, has_effector
 
 
 # --- Threshold & Prior Definitions ---
@@ -416,7 +406,7 @@ def add_stat(metric, type_val, corr_val, cat_val, prior_val, thresh_val, val):
 add_stat("Total_Traits", "Trait_stats", "Raw", "N/A", "N/A", "N/A", total_traits)
 add_stat("Total_Loci", "Loci_stats", "Raw", "N/A", "N/A", "N/A", total_loci)
 add_stat("Total_Genes", "Gene_stats", "Raw", "N/A", "N/A", "N/A", TOTAL_HUMAN_GENES)
-add_stat("Effective_Traits", "Trait_stats", "Corr_corrected", "N/A", "N/A", "N/A", n_eff_alt)
+add_stat("Effective_Traits", "Trait_stats", "Corr_adjusted", "N/A", "N/A", "N/A", n_eff_alt)
 
 precalculated_html_data = {}
 m_pie = dict(l=20, r=20, t=55, b=20)
@@ -456,65 +446,74 @@ for pr in priors:
 
         clin_counts = {k: {'total': 0, 'novel': 0} for k in
                        ['NO TRIAL', 'PRECLINICAL', 'PHASE 1', 'PHASE 2', 'PHASE 3', 'APPROVAL']}
+
+        # Calculation of Raw and Adjusted Statistics
+        # G_raw_i: Genes per trait i
+        G_raw = {t: len(trait_genes.get(t, set())) for t in trait_names_list}
+        # G_adj_i: Adjusted genes per trait i
+        G_adj = {t: G_raw[t] * trait_weights.get(t, 0) for t in trait_names_list}
+
+        # T_raw_j: Traits per gene j
+        T_raw = {g: len(gene_traits.get(g, set())) for g in gene_traits}
+        # T_adj_j: Adjusted traits per gene j
+        T_adj = {g: sum(trait_weights.get(t, 0) for t in gene_traits.get(g, set())) for g in gene_traits}
+
         novel_pairs_raw = 0
-        novel_pairs_corr = 0
+        novel_pairs_adj = 0
         novel_genes_per_trait = defaultdict(set)
+        repurposable_pairs_raw = 0
+        repurposable_pairs_adj = 0
 
         for g, traits in gene_traits.items():
             for t in traits:
-                p_rank, p_name, is_novel = evaluate_pair(g, t)
+                p_rank, p_name, is_novel, is_repurposable, has_effector = evaluate_pair(g, t)
 
                 clin_counts[p_name]['total'] += 1
+                w = trait_weights.get(t, 0)
                 if is_novel:
                     clin_counts[p_name]['novel'] += 1
                     novel_pairs_raw += 1
-                    novel_pairs_corr += trait_weights.get(t, 0) * n_eff_alt
+                    novel_pairs_adj += w
                     novel_genes_per_trait[t].add(g)
+                if is_repurposable:
+                    repurposable_pairs_raw += 1
+                    repurposable_pairs_adj += w
 
         novel_genes_raw = len(set(g for traits in novel_genes_per_trait.values() for g in traits))
+        NovAG_raw = {t: len(novel_genes_per_trait.get(t, set())) for t in trait_names_list}
+        NovAG_adj = {t: NovAG_raw[t] * trait_weights.get(t, 0) for t in trait_names_list}
 
-        pleiotropy_raw = [len(traits) for traits in gene_traits.values()]
-        pleiotropy_corr = [sum(trait_weights.get(t, 0) * n_eff_alt for t in traits) for traits in gene_traits.values()]
+        total_assoc_pairs_raw = sum(G_raw.values())
+        total_assoc_pairs_adj = sum(G_adj.values())
 
-        polygenicity_raw = [len(trait_genes.get(t, set())) for t in trait_names_list]
-        eff_genes_per_trait_list = [len(trait_genes.get(t, set())) * trait_weights.get(t, 0) * n_eff_alt for t in
-                                    trait_names_list]
+        pleiotropic_genes_raw = sum(1 for v in T_raw.values() if v >= 2)
+        pleiotropic_genes_adj = sum(1 for v in T_adj.values() if v >= 2)
 
-        total_assoc_pairs_raw = sum(pleiotropy_raw) if pleiotropy_raw else 0
-        total_assoc_pairs_corr = sum(pleiotropy_corr) if pleiotropy_corr else 0
+        avg_traits_per_gene_raw = total_assoc_pairs_raw / TOTAL_HUMAN_GENES
+        avg_traits_per_gene_adj = total_assoc_pairs_adj / TOTAL_HUMAN_GENES
 
-        pleiotropic_genes_raw = sum(1 for p in pleiotropy_raw if p >= 2)
-        pleiotropic_genes_corr = sum(1 for p in pleiotropy_corr if p >= 2)
-
-        avg_traits_per_gene_raw = np.mean(pleiotropy_raw) if pleiotropy_raw else 0
-        avg_traits_per_gene_corr = np.mean(pleiotropy_corr) if pleiotropy_corr else 0
-
-        avg_genes_per_trait_raw = np.mean(polygenicity_raw) if polygenicity_raw else 0
-        avg_genes_per_trait_corr = sum(
-            len(trait_genes.get(t, set())) * trait_weights.get(t, 0) for t in trait_names_list)
+        avg_genes_per_trait_raw = total_assoc_pairs_raw / total_traits
+        avg_genes_per_trait_adj = total_assoc_pairs_adj / total_traits
 
         genetic_signal_raw = avg_genes_per_trait_raw / TOTAL_HUMAN_GENES
-        genetic_signal_corr = avg_genes_per_trait_corr / TOTAL_HUMAN_GENES
+        genetic_signal_adj = avg_genes_per_trait_adj / TOTAL_HUMAN_GENES
 
-        novel_genes_per_trait_counts_raw = [len(novel_genes_per_trait.get(t, set())) for t in trait_names_list]
-        avg_novel_genes_per_trait_raw = np.mean(
-            novel_genes_per_trait_counts_raw) if novel_genes_per_trait_counts_raw else 0
-        avg_novel_genes_per_trait_corr = sum(
-            len(novel_genes_per_trait.get(t, set())) * trait_weights.get(t, 0) for t in trait_names_list)
+        avg_novel_genes_per_trait_raw = sum(NovAG_raw.values()) / total_traits
+        avg_novel_genes_per_trait_adj = sum(NovAG_adj.values()) / total_traits
 
         # HTML Plot generation payload
         plots = {
             "plot_a": create_pie_of_pie_json(filt_true, total_loci - filt_true, m_pie,
                                              f"<b>a</b> Evidence driving associations ({total_loci:,} loci)"),
-            "plot_b": create_histogram_json(pleiotropy_raw, "<b>b</b> Gene pleiotropy", "Traits Associated per Gene",
+            "plot_b": create_histogram_json(list(T_raw.values()), "<b>b</b> Gene pleiotropy", "Traits Associated per Gene",
                                             m_split, fill_color='rgba(134, 193, 102, 0.5)'),
-            "plot_b_eff": create_histogram_json(pleiotropy_corr, "<b>b</b> Effective Gene pleiotropy",
+            "plot_b_eff": create_histogram_json(list(T_adj.values()), "<b>b</b> Effective Gene pleiotropy",
                                                 "Effective Traits Associated per Gene", m_split,
                                                 fill_color='rgba(134, 193, 102, 0.5)'),
-            "plot_c": create_histogram_json(polygenicity_raw, "<b>c</b> Trait polygenicity",
+            "plot_c": create_histogram_json(list(G_raw.values()), "<b>c</b> Trait polygenicity",
                                             "Genes Associated per Trait", m_split,
                                             fill_color='rgba(74, 136, 201, 0.5)'),
-            "plot_c_eff": create_histogram_json(eff_genes_per_trait_list, "<b>c</b> Effective Trait polygenicity",
+            "plot_c_eff": create_histogram_json(list(G_adj.values()), "<b>c</b> Effective Trait polygenicity",
                                                 "Effective Genes Associated per Trait", m_split,
                                                 fill_color='rgba(74, 136, 201, 0.5)'),
             "plot_d_left": create_histogram_json(f_adjusted, "<b>d</b> Distribution of expected genes",
@@ -527,37 +526,35 @@ for pr in priors:
         }
         precalculated_html_data[pr_str][cat] = {"plots": {k: json.loads(v) for k, v in plots.items()}}
 
-        adj_single_gene_loci = sum(
-            1 * trait_weights.get(t, 0) for t, clumps in all_raw_data.items() for c, v in clumps.items() if
-            len([x for x in v if x[0] >= cat_threshold]) == 1) * total_traits
-
         add_stat("Single_Gene_Loci", "Loci_stats", "Raw", cat, pr_str, cat_threshold, single_gene_loci)
         add_stat("Top_Nearest_Gene_Loci", "Loci_stats", "Raw", cat, pr_str, cat_threshold, filt_true)
         add_stat("Total_Associated_Genes", "Gene_stats", "Raw", cat, pr_str, cat_threshold, num_associated_genes)
-        add_stat("Genes_Single_Trait", "Gene_stats", "Raw", cat, pr_str, cat_threshold, pleiotropy_raw.count(1))
+        add_stat("Genes_Single_Trait", "Gene_stats", "Raw", cat, pr_str, cat_threshold, list(T_raw.values()).count(1))
         add_stat("Pleiotropic_Genes", "Gene_stats", "Raw", cat, pr_str, cat_threshold, pleiotropic_genes_raw)
-        add_stat("Pleiotropic_Genes", "Gene_stats", "Bias_corrected", cat, pr_str, cat_threshold,
-                 pleiotropic_genes_corr)
+        add_stat("Pleiotropic_Genes", "Gene_stats", "Bias_adjusted", cat, pr_str, cat_threshold,
+                 pleiotropic_genes_adj)
         add_stat("Avg_Traits_Per_Gene", "Gene_stats", "Raw", cat, pr_str, cat_threshold, avg_traits_per_gene_raw)
-        add_stat("Avg_Traits_Per_Gene", "Gene_stats", "Bias_corrected", cat, pr_str, cat_threshold,
-                 avg_traits_per_gene_corr)
+        add_stat("Avg_Traits_Per_Gene", "Gene_stats", "Bias_adjusted", cat, pr_str, cat_threshold,
+                 avg_traits_per_gene_adj)
         add_stat("Total_Associated_Pairs", "Association_stats", "Raw", cat, pr_str, cat_threshold,
                  total_assoc_pairs_raw)
-        add_stat("Total_Associated_Pairs", "Association_stats", "Bias_corrected", cat, pr_str, cat_threshold,
-                 total_assoc_pairs_corr)
+        add_stat("Total_Associated_Pairs", "Association_stats", "Bias_adjusted", cat, pr_str, cat_threshold,
+                 total_assoc_pairs_adj)
         add_stat("Avg_Genes_Per_Trait", "Trait_stats", "Raw", cat, pr_str, cat_threshold, avg_genes_per_trait_raw)
-        add_stat("Avg_Genes_Per_Trait", "Trait_stats", "Bias_corrected", cat, pr_str, cat_threshold,
-                 avg_genes_per_trait_corr)
+        add_stat("Avg_Genes_Per_Trait", "Trait_stats", "Bias_adjusted", cat, pr_str, cat_threshold,
+                 avg_genes_per_trait_adj)
         add_stat("Genetic_signal", "Trait_stats", "Raw", cat, pr_str, cat_threshold, genetic_signal_raw)
-        add_stat("Genetic_signal", "Trait_stats", "Bias_corrected", cat, pr_str, cat_threshold, genetic_signal_corr)
+        add_stat("Genetic_signal", "Trait_stats", "Bias_adjusted", cat, pr_str, cat_threshold, genetic_signal_adj)
         add_stat("Novel_Pairs_Discovered", "Clinical_n_novelty", "Raw", cat, pr_str, cat_threshold, novel_pairs_raw)
-        add_stat("Novel_Pairs_Discovered", "Clinical_n_novelty", "Bias_corrected", cat, pr_str, cat_threshold,
-                 novel_pairs_corr)
-        add_stat("Novel_Genes_Discovered", "Clinical_n_novelty", "Raw", cat, pr_str, cat_threshold, novel_genes_raw)
+        add_stat("Novel_Pairs_Discovered", "Clinical_n_novelty", "Bias_adjusted", cat, pr_str, cat_threshold,
+                 novel_pairs_adj)
+        add_stat("Novel_Genes_Discovered", "Gene_stats", "Raw", cat, pr_str, cat_threshold, novel_genes_raw)
         add_stat("Avg_Novel_Genes_Per_Trait", "Clinical_n_novelty", "Raw", cat, pr_str, cat_threshold,
                  avg_novel_genes_per_trait_raw)
-        add_stat("Avg_Novel_Genes_Per_Trait", "Clinical_n_novelty", "Bias_corrected", cat, pr_str, cat_threshold,
-                 avg_novel_genes_per_trait_corr)
+        add_stat("Avg_Novel_Genes_Per_Trait", "Clinical_n_novelty", "Bias_adjusted", cat, pr_str, cat_threshold,
+                 avg_novel_genes_per_trait_adj)
+        add_stat("Repurposable_Pairs", "Clinical_n_novelty", "Raw", cat, pr_str, cat_threshold, repurposable_pairs_raw)
+        add_stat("Repurposable_Pairs", "Clinical_n_novelty", "Bias_adjusted", cat, pr_str, cat_threshold, repurposable_pairs_adj)
 
 stats_df = pd.DataFrame(stats_list,
                         columns=["Metric_Name", "Type", "Correction", "cat", "pr_str", "Threshold", "Value"])
