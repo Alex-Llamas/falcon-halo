@@ -16,6 +16,10 @@ parser.add_option("", '--input', action='append', help="Input TSV file(s)")
 parser.add_option("", "--output_html", default="nature_figure.html", help="Output HTML filename")
 parser.add_option("", "--output_tsv", default="gmap_statistics.tsv", help="Output TSV filename")
 parser.add_option("", "--top_dist_output", default="gmap_top_distributions.tsv", help="Top distributions Output TSV filename")
+parser.add_option("", "--output_count_hist_html", default="gmap_count_hist.html", help="Count histograms HTML output")
+parser.add_option("", "--output_count_hist_stats_tsv", default="gmap_count_hist_stats.tsv", help="Count histograms stats TSV output")
+parser.add_option("", "--output_prob_hist_html", default="gmap_prob_hist.html", help="Probability histograms HTML output")
+parser.add_option("", "--output_count_prob_stats_tsv", default="gmap_prob_hist_stats.tsv", help="Probability histograms stats TSV output")
 parser.add_option("", "--clinical",
                   default="/humgen/diabetes/loki/source/PEGS/paper/figures/figure_3/clinical_trials.csv",
                   help="Clinical trials CSV file")
@@ -141,10 +145,10 @@ def create_bar_json(counts_dict, title, xaxis_title, margin, fill_color, line_co
                          text=[no_trial_nov if no_trial_nov > 0 else ''], textposition='auto', showlegend=False,
                          width=0.6), row=1, col=1)
 
-    labels_v = ['Preclinical', 'Phase 1', 'Phase 2', 'Phase 3', 'Approval']
-    keys_v = ['PRECLINICAL', 'PHASE 1', 'PHASE 2', 'PHASE 3', 'APPROVAL']
-    values_v_tot = [counts_dict[k]['total'] for k in keys_v]
-    values_v_nov = [counts_dict[k]['novel'] for k in keys_v]
+    labels_v = ['Unknown', 'Preclinical', 'Phase 1', 'Phase 1/2', 'Phase 2', 'Phase 2/3', 'Phase 3', 'Approval']
+    keys_v = ['UNKNOWN', 'PRECLINICAL', 'PHASE_1', 'PHASE_1_2', 'PHASE_2', 'PHASE_2_3', 'PHASE_3', 'APPROVAL']
+    values_v_tot = [counts_dict.get(k, {'total': 0})['total'] for k in keys_v]
+    values_v_nov = [counts_dict.get(k, {'novel': 0})['novel'] for k in keys_v]
 
     fig.add_trace(
         go.Bar(x=labels_v, y=values_v_tot, orientation='v', marker_color=fill_color, marker_line_color=line_color,
@@ -167,6 +171,26 @@ nlp_model = SentenceTransformer('NeuML/pubmedbert-base-embeddings')
 
 
 # --- Helper Functions ---
+def get_hist_stats(data, is_count=True):
+    if not data or len(data) == 0:
+        stats = {'mean': 0.0, 'std': 0.0, 'median': 0.0, 'q1': 0.0, 'q3': 0.0}
+        if is_count:
+            stats.update({'plus_1': 0, 'exact_1': 0})
+        return stats
+    d = np.array(data)
+    stats = {
+        'mean': float(np.mean(d)),
+        'std': float(np.std(d)),
+        'median': float(np.median(d)),
+        'q1': float(np.percentile(d, 25)),
+        'q3': float(np.percentile(d, 75))
+    }
+    if is_count:
+        stats['plus_1'] = int(np.sum(d > 1))
+        stats['exact_1'] = int(np.sum(d == 1))
+    return stats
+
+
 def create_genes_dictionary(filepath, threshold):
     filtered_values = defaultdict(list)
     unfiltered_values = defaultdict(list)
@@ -221,7 +245,13 @@ if os.path.exists(options.trait_descriptions):
 
 # --- Load Metadata & Calculate Weights ---
 print("\n[LOG] Calculating metadata imputation and weights...")
-name_to_idx = {path.split('/')[9]: i for i, path in enumerate(options.input)}
+def get_trait_name(path):
+    parts = path.split('/')
+    if len(parts) > 9:
+        return parts[9]
+    return os.path.basename(path).replace('.tsv', '').replace('.csv', '')
+
+name_to_idx = {get_trait_name(path): i for i, path in enumerate(options.input)}
 total_traits = len(options.input)
 trait_names_list = list(name_to_idx.keys())
 
@@ -250,7 +280,7 @@ meta_df['power'] = meta_df['N_imp'] * meta_df['h2_imp'].clip(lower=0)
 P_max = meta_df['power'].max()
 if P_max <= 0: P_max = 1.0
 
-meta_df['W_pow'] = np.log(1 + meta_df['power']) / np.log(1 + P_max)
+meta_df['W_pow'] = np.log(1 + meta_df['power'].astype(float)) / np.log(1 + float(P_max))
 
 dense_mat = np.eye(total_traits, dtype=np.float64)
 if options.corr and os.path.exists(options.corr):
@@ -288,14 +318,23 @@ print(f"[LOG] Calculated Effective Traits (N_eff - fractional): {n_eff_alt:.2f}"
 print("\n[LOG] Parsing clinical trials and effector gene lists for pair matching...")
 
 
+CLINICAL_STAGES = ['UNKNOWN', 'PRECLINICAL', 'PHASE_1', 'PHASE_1_2', 'PHASE_2', 'PHASE_2_3', 'PHASE_3', 'APPROVAL']
+STAGE_TO_RANK = {s: i for i, s in enumerate(CLINICAL_STAGES)}
+
 def get_phase_rank(p):
-    p_str = str(p).upper()
-    if 'APPROV' in p_str or 'LAUNCH' in p_str or '4' in p_str: return 4, 'APPROVAL'
-    if '3' in p_str: return 3, 'PHASE 3'
-    if '2' in p_str: return 2, 'PHASE 2'
-    if '1' in p_str: return 1, 'PHASE 1'
-    if 'PRE' in p_str: return 0, 'PRECLINICAL'
-    return -1, None
+    p_str = str(p).upper().replace(' ', '_')
+    if 'APPROV' in p_str or 'LAUNCH' in p_str or '4' in p_str:
+        return STAGE_TO_RANK['APPROVAL'], 'APPROVAL'
+
+    if p_str in STAGE_TO_RANK:
+        return STAGE_TO_RANK[p_str], p_str
+
+    if 'PHASE_3' in p_str: return STAGE_TO_RANK['PHASE_3'], 'PHASE_3'
+    if 'PHASE_2' in p_str: return STAGE_TO_RANK['PHASE_2'], 'PHASE_2'
+    if 'PHASE_1' in p_str: return STAGE_TO_RANK['PHASE_1'], 'PHASE_1'
+    if 'PRE' in p_str: return STAGE_TO_RANK['PRECLINICAL'], 'PRECLINICAL'
+
+    return STAGE_TO_RANK['UNKNOWN'], 'UNKNOWN'
 
 
 gene_clin_map = defaultdict(list)
@@ -404,7 +443,7 @@ all_raw_data = {}
 print("\n[LOG] Extracting clumps from input files...")
 for file_path in options.input:
     if not os.path.exists(file_path): continue
-    t_name = file_path.split('/')[9]
+    t_name = get_trait_name(file_path)
     _, unfilt_dict = create_genes_dictionary(file_path, -1.0)
     all_raw_data[t_name] = unfilt_dict
 
@@ -431,20 +470,35 @@ for c, m_eff in meff_results.items():
     add_stat("Effective_Traits", "Trait_stats", "Corr_adjusted", "N/A", "N/A", c, m_eff)
 
 precalculated_html_data = {}
+precalculated_count_hist_data = {}
+precalculated_prob_hist_data = {}
+
 m_pie = dict(l=20, r=20, t=55, b=20)
 m_split = dict(l=40, r=20, t=45, b=35)
 
 top_dist_list = []
+count_hist_stats_list = []
+prob_hist_stats_list = []
+
 for pr in priors:
     pr_str = str(pr)
     precalculated_html_data[pr_str] = {}
+    precalculated_count_hist_data[pr_str] = {}
+    precalculated_prob_hist_data[pr_str] = {}
 
     for cat, cat_info in bayes_factors.items():
         cat_threshold = calc_threshold(cat, pr)
         op = cat_info["op"]
 
+        # To store probabilities for each type
+        # types: All, clinical, clinical on stage s, effector, novel and repurposable
+        prob_dist = defaultdict(list)
+        # To store (gene, trait) pairs for each type
+        type_pairs = defaultdict(list)
+
         trait_genes = defaultdict(set)
         gene_traits = defaultdict(set)
+
         filt_true_raw, filt_true_adj = 0, 0
         single_gene_loci_raw, single_gene_loci_adj = 0, 0
         f_adjusted_raw, f_adjusted_adj = [], []
@@ -474,117 +528,121 @@ for pr in priors:
                     trait_genes[t].add(gene)
                     gene_traits[gene].add(t)
 
+                    p_rank, p_name, is_novel, is_repurposable, has_effector, is_clinical = evaluate_pair(gene, t)
+
+                    pair = (gene, t)
+                    # All
+                    type_pairs['All'].append(pair)
+                    prob_dist['All'].append(prob)
+                    # Clinical
+                    if is_clinical:
+                        type_pairs['Clinical'].append(pair)
+                        prob_dist['Clinical'].append(prob)
+                    # Clinical on stage s
+                    if p_name and p_name != 'NO TRIAL':
+                        type_pairs[f'Clinical_{p_name}'].append(pair)
+                        prob_dist[f'Clinical_{p_name}'].append(prob)
+                    # Effector
+                    if has_effector:
+                        type_pairs['Effector'].append(pair)
+                        prob_dist['Effector'].append(prob)
+                    # Novel
+                    if is_novel:
+                        type_pairs['Novel'].append(pair)
+                        prob_dist['Novel'].append(prob)
+                    # Repurposable
+                    if is_repurposable:
+                        type_pairs['Repurposable'].append(pair)
+                        prob_dist['Repurposable'].append(prob)
+
         num_associated_genes = len(gene_traits)
 
-        clin_counts_raw = {k: {'total': 0, 'novel': 0} for k in
-                           ['NO TRIAL', 'PRECLINICAL', 'PHASE 1', 'PHASE 2', 'PHASE 3', 'APPROVAL']}
-        clin_counts_adj = {k: {'total': 0, 'novel': 0} for k in
-                           ['NO TRIAL', 'PRECLINICAL', 'PHASE 1', 'PHASE 2', 'PHASE 3', 'APPROVAL']}
+        clin_counts_raw = {k: {'total': 0, 'novel': 0} for k in ['NO TRIAL'] + CLINICAL_STAGES}
+        clin_counts_adj = {k: {'total': 0, 'novel': 0} for k in ['NO TRIAL'] + CLINICAL_STAGES}
 
-        # Sets of pairs for top distributions
-        pairs_all = []
-        pairs_novel = []
-        pairs_clinical = []
-        pairs_repurposable = []
+        # We will use these for the count histograms and averages
+        # For each type, we need Genes per Trait and Traits per Gene
+        # types: All, Clinical, Clinical_{stage}, Effector, Novel, Repurposable
 
-        # Calculation of Raw and Adjusted Statistics
-        # G_raw_j: Genes per trait j
-        G_raw = {t: len(trait_genes.get(t, set())) for t in trait_names_list}
-        # G_adj_j: Adjusted genes per trait j
-        G_adj = {t: sum(1.0 * trait_weights.get(t, 0) for _ in trait_genes.get(t, set())) for t in trait_names_list}
+        type_genes_per_trait = defaultdict(lambda: defaultdict(set))
+        type_traits_per_gene = defaultdict(lambda: defaultdict(set))
 
-        # T_raw_i: Traits per gene i
-        T_raw = {g: len(gene_traits.get(g, set())) for g in gene_traits}
-        # T_adj_i: Adjusted traits per gene i
-        T_adj = {g: sum(trait_weights.get(t, 0) for t in gene_traits.get(g, set())) for g in gene_traits}
+        for tp, pairs in type_pairs.items():
+            for g, t in pairs:
+                type_genes_per_trait[tp][t].add(g)
+                type_traits_per_gene[tp][g].add(t)
 
-        novel_pairs_raw = 0
-        novel_pairs_adj = 0
-        novel_genes_per_trait = defaultdict(set)
-        novel_traits_per_gene = defaultdict(set)
+        # For Chart (e) specifically
+        for g, t in type_pairs['All']:
+            p_rank, p_name, is_novel, is_repurposable, has_effector, is_clinical = evaluate_pair(g, t)
+            w = trait_weights.get(t, 0)
+            clin_counts_raw[p_name]['total'] += 1
+            clin_counts_adj[p_name]['total'] += w
+            if is_novel:
+                clin_counts_raw[p_name]['novel'] += 1
+                clin_counts_adj[p_name]['novel'] += w
 
-        repurposable_pairs_raw = 0
-        repurposable_pairs_adj = 0
-        repurposable_genes_per_trait = defaultdict(set)
-        repurposable_traits_per_gene = defaultdict(set)
+        # Pre-calculate counts and probabilities for histograms and stats
+        # corrections: Raw, Bias_adjusted
+        for corr in ['Raw', 'Bias_adjusted']:
+            if corr not in precalculated_count_hist_data[pr_str]:
+                precalculated_count_hist_data[pr_str][corr] = {}
+                precalculated_prob_hist_data[pr_str][corr] = {}
+            if cat not in precalculated_count_hist_data[pr_str][corr]:
+                precalculated_count_hist_data[pr_str][corr][cat] = {}
+                precalculated_prob_hist_data[pr_str][corr][cat] = {}
 
-        for g, traits in gene_traits.items():
-            for t in traits:
-                p_rank, p_name, is_novel, is_repurposable, has_effector, is_clinical = evaluate_pair(g, t)
+            for tp in type_pairs.keys():
+                # Counts
+                genes_per_trait = [len(type_genes_per_trait[tp].get(t, set())) for t in trait_names_list]
+                traits_per_gene = [len(type_traits_per_gene[tp].get(g, set())) for g in (gene_traits if tp == 'All' else type_traits_per_gene[tp].keys())]
 
-                w = trait_weights.get(t, 0)
-                clin_counts_raw[p_name]['total'] += 1
-                clin_counts_adj[p_name]['total'] += w
+                if corr == 'Bias_adjusted':
+                    genes_per_trait = [len(type_genes_per_trait[tp].get(t, set())) * trait_weights.get(t, 0) for t in trait_names_list]
+                    traits_per_gene = [sum(trait_weights.get(t, 0) for t in type_traits_per_gene[tp].get(g, set())) for g in (gene_traits if tp == 'All' else type_traits_per_gene[tp].keys())]
 
-                pairs_all.append((g, t))
-                if is_novel:
-                    clin_counts_raw[p_name]['novel'] += 1
-                    clin_counts_adj[p_name]['novel'] += w
-                    novel_pairs_raw += 1
-                    novel_pairs_adj += w
-                    novel_genes_per_trait[t].add(g)
-                    novel_traits_per_gene[g].add(t)
-                    pairs_novel.append((g, t))
-                if is_repurposable:
-                    repurposable_pairs_raw += 1
-                    repurposable_pairs_adj += w
-                    repurposable_genes_per_trait[t].add(g)
-                    repurposable_traits_per_gene[g].add(t)
-                    pairs_repurposable.append((g, t))
-                if is_clinical:
-                    pairs_clinical.append((g, t))
+                # Probabilities (Correction doesn't apply to raw probability values, but we might filter or weight if needed?
+                # The doc says "probability distributions ... by type ... for each type and threshold".
+                # It doesn't explicitly say to weight probabilities. Usually probability histograms are just of the values.)
+                probs = prob_dist[tp]
 
-        # NovAG_raw_j, NovAG_adj_j
-        NovAG_raw = {t: len(novel_genes_per_trait.get(t, set())) for t in trait_names_list}
-        NovAG_adj = {t: NovAG_raw[t] * trait_weights.get(t, 0) for t in trait_names_list}
-        # NovAT_raw_i, NovAT_adj_i
-        NovAT_raw = {g: len(novel_traits_per_gene.get(g, set())) for g in gene_traits}
-        NovAT_adj = {g: sum(trait_weights.get(t, 0) for t in novel_traits_per_gene.get(g, set())) for g in gene_traits}
+                # Stats for Counts
+                gpt_stats = get_hist_stats(genes_per_trait, is_count=True)
+                tpg_stats = get_hist_stats(traits_per_gene, is_count=True)
 
-        # RepAG_raw_j, RepAG_adj_j
-        RepAG_raw = {t: len(repurposable_genes_per_trait.get(t, set())) for t in trait_names_list}
-        RepAG_adj = {t: RepAG_raw[t] * trait_weights.get(t, 0) for t in trait_names_list}
-        # RepAT_raw_i, RepAT_adj_i
-        RepAT_raw = {g: len(repurposable_traits_per_gene.get(g, set())) for g in gene_traits}
-        RepAT_adj = {g: sum(trait_weights.get(t, 0) for t in repurposable_traits_per_gene.get(g, set())) for g in gene_traits}
+                for metric, sdict in [('Genes_Per_Trait', gpt_stats), ('Traits_Per_Gene', tpg_stats)]:
+                    for s_name, s_val in sdict.items():
+                        count_hist_stats_list.append({
+                            'BayesFactor': cat, 'Prior': pr_str, 'Correction': corr, 'Type': tp,
+                            'Metric': metric, 'Stat': s_name, 'Value': s_val
+                        })
 
-        novel_genes_count_raw = len(set(g for traits in novel_genes_per_trait.values() for g in traits))
+                # Stats for Probabilities
+                prob_stats = get_hist_stats(probs, is_count=False)
+                for s_name, s_val in prob_stats.items():
+                    prob_hist_stats_list.append({
+                        'BayesFactor': cat, 'Prior': pr_str, 'Correction': corr, 'Type': tp,
+                        'Metric': 'Probability', 'Stat': s_name, 'Value': s_val
+                    })
 
-        total_assoc_pairs_raw = sum(G_raw.values())
-        total_assoc_pairs_adj = sum(G_adj.values())
-
-        pleiotropic_genes_raw = sum(1 for v in T_raw.values() if v >= 2)
-        pleiotropic_genes_adj = sum(1 for v in T_adj.values() if v >= 2)
-
-        avg_traits_per_gene_raw = total_assoc_pairs_raw / TOTAL_HUMAN_GENES
-        avg_traits_per_gene_adj = total_assoc_pairs_adj / TOTAL_HUMAN_GENES
-
-        avg_genes_per_trait_raw = total_assoc_pairs_raw / total_traits
-        avg_genes_per_trait_adj = total_assoc_pairs_adj / total_traits
-
-        genetic_signal_raw = avg_genes_per_trait_raw / TOTAL_HUMAN_GENES
-        genetic_signal_adj = avg_genes_per_trait_adj / TOTAL_HUMAN_GENES
-
-        avg_novel_genes_per_trait_raw = sum(NovAG_raw.values()) / total_traits
-        avg_novel_genes_per_trait_adj = sum(NovAG_adj.values()) / total_traits
-
-        avg_novel_traits_per_gene_raw = sum(NovAT_raw.values()) / TOTAL_HUMAN_GENES
-        avg_novel_traits_per_gene_adj = sum(NovAT_adj.values()) / TOTAL_HUMAN_GENES
-
-        avg_repurposable_genes_per_trait_raw = sum(RepAG_raw.values()) / total_traits
-        avg_repurposable_genes_per_trait_adj = sum(RepAG_adj.values()) / total_traits
-
-        # Using 'l' in variable name to match the metric name string for consistency
-        avg_repurposablel_traits_per_gene_raw = sum(RepAT_raw.values()) / TOTAL_HUMAN_GENES
-        avg_repurposablel_traits_per_gene_adj = sum(RepAT_adj.values()) / TOTAL_HUMAN_GENES
+                # Plots
+                precalculated_count_hist_data[pr_str][corr][cat][tp] = {
+                    'genes_per_trait': json.loads(create_histogram_json(genes_per_trait, f"Genes per Trait ({tp})", "Count", m_split)),
+            'traits_per_gene': json.loads(create_histogram_json(traits_per_gene, f"Traits per Gene ({tp})", "Count", m_split)),
+            'stats': {'gpt': gpt_stats, 'tpg': tpg_stats}
+                }
+                precalculated_prob_hist_data[pr_str][corr][cat][tp] = {
+            'prob_dist': json.loads(create_histogram_json(probs, f"Probability Distribution ({tp})", "Probability", m_split)),
+            'stats': {'prob': prob_stats}
+                }
 
         # Top 3 Distributions
         for corr_type in ["Raw", "Bias_adjusted"]:
-            for p_list, p_type in [(pairs_all, "All"), (pairs_novel, "Novel"), (pairs_clinical, "Clinical trials"), (pairs_repurposable, "Repurposable")]:
+            for p_type in type_pairs.keys():
                 g_counts = defaultdict(float)
                 t_counts = defaultdict(float)
                 cat_counts = defaultdict(float)
-                for g, t in p_list:
+                for g, t in type_pairs[p_type]:
                     w_top = 1.0 if corr_type == "Raw" else trait_weights.get(t, 0)
                     g_counts[g] += w_top
                     t_counts[t] += w_top
@@ -602,21 +660,67 @@ for pr in priors:
                 for rank, (name, count) in enumerate(top_cat, 1):
                     top_dist_list.append({"BayesFactor": cat, "Prior": pr_str, "Correction": corr_type, "Type": p_type, "Metric": "Category", "Rank": rank, "Name": name, "Count": count})
 
+        # Main statistics for output_tsv
+        # We need to add stats for ALL types (All, Clinical, Clinical_stage, Effector, Novel, Repurposable)
+        for corr in ['Raw', 'Bias_adjusted']:
+            for tp in type_pairs.keys():
+                pairs_count = len(type_pairs[tp])
+                if corr == 'Bias_adjusted':
+                    pairs_count = sum(trait_weights.get(t, 0) for g, t in type_pairs[tp])
+
+                prefix = tp
+                if tp == 'All':
+                    add_stat("Total_Associated_Pairs", "Association_stats", corr, cat, pr_str, cat_threshold, pairs_count)
+
+                    avg_genes_per_trait = pairs_count / total_traits
+                    add_stat("Avg_Genes_Per_Trait", "Trait_stats", corr, cat, pr_str, cat_threshold, avg_genes_per_trait)
+
+                    genetic_signal = avg_genes_per_trait / TOTAL_HUMAN_GENES
+                    add_stat("Genetic_signal", "Trait_stats", corr, cat, pr_str, cat_threshold, genetic_signal)
+
+                    tpg = [sum(trait_weights.get(t, 0) if corr == 'Bias_adjusted' else 1.0 for t in type_traits_per_gene[tp].get(g, set())) for g in gene_traits]
+                    pleiotropic_genes = sum(1 for v in tpg if v >= 2)
+                    add_stat("Pleiotropic_Genes", "Gene_stats", corr, cat, pr_str, cat_threshold, pleiotropic_genes)
+
+                    avg_traits_per_gene = pairs_count / TOTAL_HUMAN_GENES
+                    add_stat("Avg_Traits_Per_Gene", "Gene_stats", corr, cat, pr_str, cat_threshold, avg_traits_per_gene)
+                else:
+                    # e.g. Clinical_Pairs, Avg_Clinical_Genes_Per_Trait, etc.
+                    metric_pairs = f"{tp}_Pairs"
+                    if tp == 'Novel': metric_pairs = "Novel_Pairs_Discovered"
+                    if tp == 'Repurposable': metric_pairs = "Repurposable_Pairs"
+
+                    add_stat(metric_pairs, "Clinical_n_novelty", corr, cat, pr_str, cat_threshold, pairs_count)
+
+                    metric_gpt = f"Avg_{tp}_Genes_Per_Trait"
+                    add_stat(metric_gpt, "Clinical_n_novelty", corr, cat, pr_str, cat_threshold, pairs_count / total_traits)
+
+                    metric_tpg = f"Avg_{tp}_Traits_Per_Gene"
+                    add_stat(metric_tpg, "Clinical_n_novelty", corr, cat, pr_str, cat_threshold, pairs_count / TOTAL_HUMAN_GENES)
+
         # HTML Plot generation payload
+        total_assoc_pairs_raw = len(type_pairs['All'])
+        total_assoc_pairs_adj = sum(trait_weights.get(t, 0) for g, t in type_pairs['All'])
+
+        G_raw_all = [len(type_genes_per_trait['All'].get(t, set())) for t in trait_names_list]
+        G_adj_all = [len(type_genes_per_trait['All'].get(t, set())) * trait_weights.get(t, 0) for t in trait_names_list]
+        T_raw_all = [len(type_traits_per_gene['All'].get(g, set())) for g in gene_traits]
+        T_adj_all = [sum(trait_weights.get(t, 0) for t in type_traits_per_gene['All'].get(g, set())) for g in gene_traits]
+
         plots = {
             "plot_a": create_pie_of_pie_json(filt_true_raw, total_loci - filt_true_raw, m_pie,
                                              f"<b>a</b> Evidence driving associations ({total_loci:,} loci)"),
             "plot_a_eff": create_pie_of_pie_json(filt_true_adj, total_loci_adj - filt_true_adj, m_pie,
                                                  f"<b>a</b> Evidence driving associations ({total_loci_adj:.1f} effective loci)"),
-            "plot_b": create_histogram_json(list(T_raw.values()), "<b>b</b> Gene pleiotropy", "Traits Associated per Gene",
+            "plot_b": create_histogram_json(T_raw_all, "<b>b</b> Gene pleiotropy", "Traits Associated per Gene",
                                             m_split, fill_color='rgba(134, 193, 102, 0.5)'),
-            "plot_b_eff": create_histogram_json(list(T_adj.values()), "<b>b</b> Effective Gene pleiotropy",
+            "plot_b_eff": create_histogram_json(T_adj_all, "<b>b</b> Effective Gene pleiotropy",
                                                 "Effective Traits Associated per Gene", m_split,
                                                 fill_color='rgba(134, 193, 102, 0.5)'),
-            "plot_c": create_histogram_json(list(G_raw.values()), "<b>c</b> Trait polygenicity",
+            "plot_c": create_histogram_json(G_raw_all, "<b>c</b> Trait polygenicity",
                                             "Genes Associated per Trait", m_split,
                                             fill_color='rgba(74, 136, 201, 0.5)'),
-            "plot_c_eff": create_histogram_json(list(G_adj.values()), "<b>c</b> Effective Trait polygenicity",
+            "plot_c_eff": create_histogram_json(G_adj_all, "<b>c</b> Effective Trait polygenicity",
                                                 "Effective Genes Associated per Trait", m_split,
                                                 fill_color='rgba(74, 136, 201, 0.5)'),
             "plot_d_left": create_histogram_json(f_adjusted_raw, "<b>d</b> Distribution of expected genes",
@@ -641,54 +745,9 @@ for pr in priors:
         add_stat("Top_Nearest_Gene_Loci", "Loci_stats", "Raw", cat, pr_str, cat_threshold, filt_true_raw)
         add_stat("Top_Nearest_Gene_Loci", "Loci_stats", "Bias_adjusted", cat, pr_str, cat_threshold, filt_true_adj)
         add_stat("Total_Associated_Genes", "Gene_stats", "Raw", cat, pr_str, cat_threshold, num_associated_genes)
-        add_stat("Genes_Single_Trait", "Gene_stats", "Raw", cat, pr_str, cat_threshold, list(T_raw.values()).count(1))
-
-        # Pleiotropic_Genes
-        add_stat("Pleiotropic_Genes", "Gene_stats", "Raw", cat, pr_str, cat_threshold, pleiotropic_genes_raw)
-        add_stat("Pleiotropic_Genes", "Gene_stats", "Bias_adjusted", cat, pr_str, cat_threshold, pleiotropic_genes_adj)
-
-        # Avg_Traits_Per_Gene
-        add_stat("Avg_Traits_Per_Gene", "Gene_stats", "Raw", cat, pr_str, cat_threshold, avg_traits_per_gene_raw)
-        add_stat("Avg_Traits_Per_Gene", "Gene_stats", "Bias_adjusted", cat, pr_str, cat_threshold, avg_traits_per_gene_adj)
-
-        # Total_Associated_Pairs
-        add_stat("Total_Associated_Pairs", "Association_stats", "Raw", cat, pr_str, cat_threshold, total_assoc_pairs_raw)
-        add_stat("Total_Associated_Pairs", "Association_stats", "Bias_adjusted", cat, pr_str, cat_threshold, total_assoc_pairs_adj)
-
-        # Avg_Genes_Per_Trait
-        add_stat("Avg_Genes_Per_Trait", "Trait_stats", "Raw", cat, pr_str, cat_threshold, avg_genes_per_trait_raw)
-        add_stat("Avg_Genes_Per_Trait", "Trait_stats", "Bias_adjusted", cat, pr_str, cat_threshold, avg_genes_per_trait_adj)
-
-        # Genetic_signal
-        add_stat("Genetic_signal", "Trait_stats", "Raw", cat, pr_str, cat_threshold, genetic_signal_raw)
-        add_stat("Genetic_signal", "Trait_stats", "Bias_adjusted", cat, pr_str, cat_threshold, genetic_signal_adj)
-
-        # Novel_Pairs_Discovered
-        add_stat("Novel_Pairs_Discovered", "Clinical_n_novelty", "Raw", cat, pr_str, cat_threshold, novel_pairs_raw)
-        add_stat("Novel_Pairs_Discovered", "Clinical_n_novelty", "Bias_adjusted", cat, pr_str, cat_threshold, novel_pairs_adj)
-
-        # Novel_Genes_Discovered
-        add_stat("Novel_Genes_Discovered", "Gene_stats", "Raw", cat, pr_str, cat_threshold, novel_genes_count_raw)
-
-        # Avg_Novel_Genes_Per_Trait
-        add_stat("Avg_Novel_Genes_Per_Trait", "Clinical_n_novelty", "Raw", cat, pr_str, cat_threshold, avg_novel_genes_per_trait_raw)
-        add_stat("Avg_Novel_Genes_Per_Trait", "Clinical_n_novelty", "Bias_adjusted", cat, pr_str, cat_threshold, avg_novel_genes_per_trait_adj)
-
-        # Avg_Novel_Traits_Per_Gene
-        add_stat("Avg_Novel_Traits_Per_Gene", "Clinical_n_novelty", "Raw", cat, pr_str, cat_threshold, avg_novel_traits_per_gene_raw)
-        add_stat("Avg_Novel_Traits_Per_Gene", "Clinical_n_novelty", "Bias_adjusted", cat, pr_str, cat_threshold, avg_novel_traits_per_gene_adj)
-
-        # Repurposable_Pairs
-        add_stat("Repurposable_Pairs", "Clinical_n_novelty", "Raw", cat, pr_str, cat_threshold, repurposable_pairs_raw)
-        add_stat("Repurposable_Pairs", "Clinical_n_novelty", "Bias_adjusted", cat, pr_str, cat_threshold, repurposable_pairs_adj)
-
-        # Avg_Repurposable_Genes_Per_Trait
-        add_stat("Avg_Repurposable_Genes_Per_Trait", "Clinical_n_novelty", "Raw", cat, pr_str, cat_threshold, avg_repurposable_genes_per_trait_raw)
-        add_stat("Avg_Repurposable_Genes_Per_Trait", "Clinical_n_novelty", "Bias_adjusted", cat, pr_str, cat_threshold, avg_repurposable_genes_per_trait_adj)
-
-        # Avg_Repurposablel_Traits_Per_Gene
-        add_stat("Avg_Repurposablel_Traits_Per_Gene", "Clinical_n_novelty", "Raw", cat, pr_str, cat_threshold, avg_repurposablel_traits_per_gene_raw)
-        add_stat("Avg_Repurposablel_Traits_Per_Gene", "Clinical_n_novelty", "Bias_adjusted", cat, pr_str, cat_threshold, avg_repurposablel_traits_per_gene_adj)
+        # Genes_Single_Trait
+        tpg_all_raw = [len(type_traits_per_gene['All'].get(g, set())) for g in gene_traits]
+        add_stat("Genes_Single_Trait", "Gene_stats", "Raw", cat, pr_str, cat_threshold, tpg_all_raw.count(1))
 
 stats_df = pd.DataFrame(stats_list,
                         columns=["Metric_Name", "Type", "Correction", "cat", "pr_str", "Threshold", "Value"])
@@ -699,7 +758,17 @@ top_dist_df = pd.DataFrame(top_dist_list)
 top_dist_df.to_csv(options.top_dist_output, sep='\t', index=False)
 print(f"[LOG] Top distributions TSV saved to {options.top_dist_output}")
 
+count_hist_stats_df = pd.DataFrame(count_hist_stats_list)
+count_hist_stats_df.to_csv(options.output_count_hist_stats_tsv, sep='\t', index=False)
+print(f"[LOG] Count histogram statistics saved to {options.output_count_hist_stats_tsv}")
+
+prob_hist_stats_df = pd.DataFrame(prob_hist_stats_list)
+prob_hist_stats_df.to_csv(options.output_count_prob_stats_tsv, sep='\t', index=False)
+print(f"[LOG] Probability histogram statistics saved to {options.output_count_prob_stats_tsv}")
+
 js_data_str = json.dumps(precalculated_html_data)
+js_count_hist_data_str = json.dumps(precalculated_count_hist_data)
+js_prob_hist_data_str = json.dumps(precalculated_prob_hist_data)
 
 # --- Build HTML Dashboard ---
 print("\n[LOG] Generating HTML visualization payload...")
@@ -821,4 +890,142 @@ html_template = f"""
 with open(options.output_html, "w", encoding='utf-8') as f:
     f.write(html_template)
 print(f"[LOG] Figure HTML saved to: {options.output_html}")
+
+def generate_hist_html(data_json, title, output_file, is_prob=False):
+    html = f"""
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>{title}</title>
+    <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+    <style>
+        body {{ font-family: "Helvetica Neue", Helvetica, Arial, sans-serif; margin: 20px; background-color: #f3f4f6; }}
+        .controls {{ position: sticky; top: 0; z-index: 1000; background-color: #f3f4f6; padding: 15px; border-bottom: 1px solid #d1d5db; display: flex; gap: 15px; align-items: center; }}
+        .container {{ max-width: 1000px; margin: 20px auto; background: white; padding: 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }}
+        .plot-container {{ display: flex; flex-wrap: wrap; gap: 20px; justify-content: space-around; }}
+        .plot {{ width: 48%; height: 400px; }}
+        .plot-full {{ width: 100%; height: 500px; }}
+    </style>
+</head>
+<body>
+    <div class="controls">
+        <div id="thresholdDisplay" style="font-weight: bold;">Threshold: --</div>
+        <select id="priorDropdown" onchange="updateTypes(); updatePlots()">
+            <option value="1.0">Prior: 1%</option>
+            <option value="5.0" selected>Prior: 5%</option>
+        </select>
+        <select id="bfDropdown" onchange="updateTypes(); updatePlots()">
+            <option value="Definitive">Definitive</option>
+            <option value="Overwhelming">Overwhelming</option>
+            <option value="Compelling">Compelling</option>
+            <option value="Extreme">Extreme</option>
+            <option value="Very_Strong">Very Strong</option>
+            <option value="Strong" selected>Strong</option>
+            <option value="Moderate">Moderate</option>
+            <option value="Anecdotal">Anecdotal</option>
+            <option value="No_Evidence">No Evidence</option>
+        </select>
+        <select id="corrDropdown" onchange="updateTypes(); updatePlots()">
+            <option value="Raw" selected>Raw</option>
+            <option value="Bias_adjusted">Bias Adjusted</option>
+        </select>
+        <select id="typeDropdown" onchange="updatePlots()">
+        </select>
+    </div>
+    <div class="container">
+        <h1>{title}</h1>
+        <div id="stats_display" style="margin-bottom: 20px; padding: 10px; background: #e5e7eb; border-radius: 5px; font-family: monospace;"></div>
+        <div id="plots" class="plot-container"></div>
+    </div>
+
+    <script>
+        const allData = {data_json};
+        const mainData = {js_data_str};
+        const isProb = {str(is_prob).lower()};
+
+        function updateTypes() {{
+            const pr = document.getElementById('priorDropdown').value;
+            const bf = document.getElementById('bfDropdown').value;
+            const corr = document.getElementById('corrDropdown').value;
+            const typeDropdown = document.getElementById('typeDropdown');
+
+            const currentSet = allData[pr][corr][bf];
+            const types = Object.keys(currentSet).sort();
+
+            const currentVal = typeDropdown.value;
+            typeDropdown.innerHTML = '';
+            types.forEach(t => {{
+                const opt = document.createElement('option');
+                opt.value = t;
+                opt.innerText = t;
+                if (t === 'All') opt.selected = true;
+                typeDropdown.appendChild(opt);
+            }});
+            if (types.includes(currentVal)) typeDropdown.value = currentVal;
+        }}
+
+        function formatStats(stats) {{
+            let html = '';
+            for (let key in stats) {{
+                html += '<b>' + key + ':</b> ' + JSON.stringify(stats[key]) + '<br>';
+            }}
+            return html;
+        }}
+
+        function updatePlots() {{
+            const pr = document.getElementById('priorDropdown').value;
+            const bf = document.getElementById('bfDropdown').value;
+            const corr = document.getElementById('corrDropdown').value;
+            const tp = document.getElementById('typeDropdown').value;
+
+            if (mainData[pr] && mainData[pr][bf]) {{
+                document.getElementById('thresholdDisplay').innerText = "Threshold: " + mainData[pr][bf].threshold.toFixed(4);
+            }}
+
+            const plotsDiv = document.getElementById('plots');
+            const statsDiv = document.getElementById('stats_display');
+            plotsDiv.innerHTML = '';
+            statsDiv.innerHTML = '';
+
+            const data = allData[pr][corr][bf][tp];
+            if (!data) return;
+
+            statsDiv.innerHTML = formatStats(data.stats);
+
+            if (isProb) {{
+                const pDiv = document.createElement('div');
+                pDiv.className = 'plot-full';
+                pDiv.id = 'prob_plot';
+                plotsDiv.appendChild(pDiv);
+                Plotly.newPlot('prob_plot', data.prob_dist.data, data.prob_dist.layout);
+            }} else {{
+                const gDiv = document.createElement('div');
+                gDiv.className = 'plot';
+                gDiv.id = 'gpt_plot';
+                plotsDiv.appendChild(gDiv);
+                Plotly.newPlot('gpt_plot', data.genes_per_trait.data, data.genes_per_trait.layout);
+
+                const tDiv = document.createElement('div');
+                tDiv.className = 'plot';
+                tDiv.id = 'tpg_plot';
+                plotsDiv.appendChild(tDiv);
+                Plotly.newPlot('tpg_plot', data.traits_per_gene.data, data.traits_per_gene.layout);
+            }}
+        }}
+
+        updateTypes();
+        updatePlots();
+    </script>
+</body>
+</html>
+"""
+    with open(output_file, 'w', encoding='utf-8') as f:
+        f.write(html)
+
+generate_hist_html(js_count_hist_data_str, "Count Histograms", options.output_count_hist_html, is_prob=False)
+print(f"[LOG] Count histograms HTML saved to: {options.output_count_hist_html}")
+
+generate_hist_html(js_prob_hist_data_str, "Probability Histograms", options.output_prob_hist_html, is_prob=True)
+print(f"[LOG] Probability histograms HTML saved to: {options.output_prob_hist_html}")
 print("[LOG] Script execution finished.")
