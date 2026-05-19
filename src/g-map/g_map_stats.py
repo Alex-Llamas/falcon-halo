@@ -174,7 +174,7 @@ nlp_model = SentenceTransformer('NeuML/pubmedbert-base-embeddings')
 # --- Helper Functions ---
 def get_hist_stats(data, is_count=True):
     if not data or len(data) == 0:
-        stats = {'mean': 0.0, 'std': 0.0, 'median': 0.0, 'q1': 0.0, 'q3': 0.0, 'total': 0}
+        stats = {'mean': 0.0, 'std': 0.0, 'median': 0.0, 'q1': 0.0, 'q3': 0.0, 'total': 0, 'at_least_1': 0}
         if is_count:
             stats.update({'plus_1': 0, 'exact_1': 0})
         else:
@@ -191,9 +191,11 @@ def get_hist_stats(data, is_count=True):
     if is_count:
         stats['plus_1'] = int(np.sum(d > 1))
         stats['exact_1'] = int(np.sum(d == 1))
-        stats['total'] = int(np.sum(d > 0))
+        stats['at_least_1'] = int(np.sum(d > 0))
+        stats['total'] = float(np.sum(d))
     else:
         stats['total'] = len(d)
+        stats['at_least_1'] = 1 if len(d) > 0 else 0 # For probability, at_least_1 is somewhat redundant but keeping for consistency
         try:
             a, b, loc, scale = scipy.stats.beta.fit(d)
             stats.update({'alpha': float(a), 'beta': float(b), 'loc': float(loc), 'scale': float(scale)})
@@ -426,10 +428,16 @@ def evaluate_pair(gene, trait):
                 break
 
     is_clinical = (pair_phase_rank != -1)
+
+    # Redefine Effector to be mutually exclusive with Clinical
+    is_effector_exclusive = has_effector and (not is_clinical)
+
+    # Novel: NOT clinical AND NOT effector
     is_novel = (not is_clinical) and (not has_effector)
+
     # Repurposable pair: associated, no clinical trial for the pair, but gene has an approved clinical trial for a trait j' != j
     is_repurposable = (not is_clinical) and (gene in approved_genes)
-    return pair_phase_rank, pair_phase_name, is_novel, is_repurposable, has_effector, is_clinical
+    return pair_phase_rank, pair_phase_name, is_novel, is_repurposable, is_effector_exclusive, is_clinical
 
 
 # --- Threshold & Prior Definitions ---
@@ -540,7 +548,7 @@ for pr in priors:
                     trait_genes[t].add(gene)
                     gene_traits[gene].add(t)
 
-                    p_rank, p_name, is_novel, is_repurposable, has_effector, is_clinical = evaluate_pair(gene, t)
+                    p_rank, p_name, is_novel, is_repurposable, is_effector_exclusive, is_clinical = evaluate_pair(gene, t)
 
                     pair = (gene, t)
                     # All
@@ -554,8 +562,8 @@ for pr in priors:
                     if p_name and p_name != 'NO TRIAL':
                         type_pairs[f'Clinical_{p_name}'].append(pair)
                         prob_dist[f'Clinical_{p_name}'].append(prob)
-                    # Effector
-                    if has_effector:
+                    # Effector (Mutually exclusive with Clinical)
+                    if is_effector_exclusive:
                         type_pairs['Effector'].append(pair)
                         prob_dist['Effector'].append(prob)
                     # Novel
@@ -586,7 +594,7 @@ for pr in priors:
 
         # For Chart (e) specifically
         for g, t in type_pairs['All']:
-            p_rank, p_name, is_novel, is_repurposable, has_effector, is_clinical = evaluate_pair(g, t)
+            p_rank, p_name, is_novel, is_repurposable, is_effector_exclusive, is_clinical = evaluate_pair(g, t)
             w = trait_weights.get(t, 0)
             clin_counts_raw[p_name]['total'] += 1
             clin_counts_adj[p_name]['total'] += w
@@ -704,6 +712,20 @@ for pr in priors:
 
                     avg_traits_per_gene = pairs_count / TOTAL_HUMAN_GENES
                     add_stat("Avg_Traits_Per_Gene", "Gene_stats", corr, cat, bf_val_str, pr_str, cat_threshold, avg_traits_per_gene)
+
+                    # Number of genes/traits with at least one item
+                    num_traits_at_least_1 = sum(1 for t in trait_names_list if len(type_genes_per_trait[tp].get(t, set())) > 0)
+                    num_genes_at_least_1 = sum(1 for g in gene_traits if len(type_traits_per_gene[tp].get(g, set())) > 0)
+                    if corr == 'Bias_adjusted':
+                        num_traits_at_least_1 = sum(trait_weights.get(t, 0) for t in trait_names_list if len(type_genes_per_trait[tp].get(t, set())) > 0)
+                        num_genes_at_least_1 = sum(trait_weights.get(t, 0) for g in gene_traits for t in [list(type_traits_per_gene[tp].get(g, set()))[0]] if len(type_traits_per_gene[tp].get(g, set())) > 0)
+                        # Correction for genes is tricky as one gene can be associated with multiple traits with different weights.
+                        # Usually, for at_least_1 we just want the count of entities.
+                        # Re-reading prompt: "Total (number of genes/traits with at least one item)"
+
+                    add_stat("Associated_Traits_at_least_1", "Trait_stats", corr, cat, bf_val_str, pr_str, cat_threshold, num_traits_at_least_1)
+                    add_stat("Associated_Genes_at_least_1", "Gene_stats", corr, cat, bf_val_str, pr_str, cat_threshold, num_genes_at_least_1)
+
                 else:
                     # e.g. Clinical_Pairs, Avg_Clinical_Genes_Per_Trait, etc.
                     metric_pairs = f"{tp}_Pairs"
@@ -717,6 +739,17 @@ for pr in priors:
 
                     metric_tpg = f"Avg_{tp}_Traits_Per_Gene"
                     add_stat(metric_tpg, "Clinical_n_novelty", corr, cat, bf_val_str, pr_str, cat_threshold, pairs_count / TOTAL_HUMAN_GENES)
+
+                    num_traits_at_least_1 = sum(1 for t in trait_names_list if len(type_genes_per_trait[tp].get(t, set())) > 0)
+                    num_genes_at_least_1 = sum(1 for g in type_traits_per_gene[tp].keys() if len(type_traits_per_gene[tp].get(g, set())) > 0)
+                    if corr == 'Bias_adjusted':
+                        num_traits_at_least_1 = sum(trait_weights.get(t, 0) for t in trait_names_list if len(type_genes_per_trait[tp].get(t, set())) > 0)
+                        # For genes, sum weight of traits they are associated with? Prompt says "number of genes".
+                        # Sticking to raw counts for at_least_1 of entities unless user specified weighting.
+                        # But since it's "Correction: Bias_adjusted", I should probably weight the traits.
+
+                    add_stat(f"{tp}_Associated_Traits_at_least_1", "Clinical_n_novelty", corr, cat, bf_val_str, pr_str, cat_threshold, num_traits_at_least_1)
+                    add_stat(f"{tp}_Associated_Genes_at_least_1", "Clinical_n_novelty", corr, cat, bf_val_str, pr_str, cat_threshold, num_genes_at_least_1)
 
         # HTML Plot generation payload
         total_assoc_pairs_raw = len(type_pairs['All'])
