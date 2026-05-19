@@ -2,6 +2,7 @@ from optparse import OptionParser
 import pandas as pd
 import numpy as np
 import scipy.linalg
+import scipy.stats
 import json
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
@@ -173,9 +174,11 @@ nlp_model = SentenceTransformer('NeuML/pubmedbert-base-embeddings')
 # --- Helper Functions ---
 def get_hist_stats(data, is_count=True):
     if not data or len(data) == 0:
-        stats = {'mean': 0.0, 'std': 0.0, 'median': 0.0, 'q1': 0.0, 'q3': 0.0}
+        stats = {'mean': 0.0, 'std': 0.0, 'median': 0.0, 'q1': 0.0, 'q3': 0.0, 'total': 0}
         if is_count:
             stats.update({'plus_1': 0, 'exact_1': 0})
+        else:
+            stats.update({'alpha': 0.0, 'beta': 0.0, 'loc': 0.0, 'scale': 0.0})
         return stats
     d = np.array(data)
     stats = {
@@ -188,6 +191,14 @@ def get_hist_stats(data, is_count=True):
     if is_count:
         stats['plus_1'] = int(np.sum(d > 1))
         stats['exact_1'] = int(np.sum(d == 1))
+        stats['total'] = int(np.sum(d > 0))
+    else:
+        stats['total'] = len(d)
+        try:
+            a, b, loc, scale = scipy.stats.beta.fit(d)
+            stats.update({'alpha': float(a), 'beta': float(b), 'loc': float(loc), 'scale': float(scale)})
+        except:
+            stats.update({'alpha': 0.0, 'beta': 0.0, 'loc': 0.0, 'scale': 0.0})
     return stats
 
 
@@ -455,19 +466,19 @@ print("\n[LOG] Calculating threshold statistics and HTML graphs...")
 stats_list = []
 
 
-def add_stat(metric, type_val, corr_val, cat_val, prior_val, thresh_val, val):
+def add_stat(metric, type_val, corr_val, cat_val, bf_val, prior_val, thresh_val, val):
     stats_list.append({
         "Metric_Name": metric, "Type": type_val, "Correction": corr_val,
-        "cat": cat_val, "pr_str": prior_val, "Threshold": thresh_val, "Value": val
+        "BayesFactorCat": cat_val, "BayesFactorVal": bf_val, "pr_str": prior_val, "Threshold": thresh_val, "Value": val
     })
 
 
-add_stat("Total_Traits", "Trait_stats", "Raw", "N/A", "N/A", "N/A", total_traits)
-add_stat("Total_Loci", "Loci_stats", "Raw", "N/A", "N/A", "N/A", total_loci)
-add_stat("Total_Genes", "Gene_stats", "Raw", "N/A", "N/A", "N/A", TOTAL_HUMAN_GENES)
-add_stat("Effective_Traits", "Trait_stats", "Corr_adjusted", "N/A", "N/A", "N/A", n_eff_alt)
+add_stat("Total_Traits", "Trait_stats", "Raw", "N/A", "N/A", "N/A", "N/A", total_traits)
+add_stat("Total_Loci", "Loci_stats", "Raw", "N/A", "N/A", "N/A", "N/A", total_loci)
+add_stat("Total_Genes", "Gene_stats", "Raw", "N/A", "N/A", "N/A", "N/A", TOTAL_HUMAN_GENES)
+add_stat("Effective_Traits", "Trait_stats", "Corr_adjusted", "N/A", "N/A", "N/A", "N/A", n_eff_alt)
 for c, m_eff in meff_results.items():
-    add_stat("Effective_Traits", "Trait_stats", "Corr_adjusted", "N/A", "N/A", c, m_eff)
+    add_stat("Effective_Traits", "Trait_stats", "Corr_adjusted", "N/A", "N/A", "N/A", c, m_eff)
 
 precalculated_html_data = {}
 precalculated_count_hist_data = {}
@@ -489,6 +500,7 @@ for pr in priors:
     for cat, cat_info in bayes_factors.items():
         cat_threshold = calc_threshold(cat, pr)
         op = cat_info["op"]
+        bf_val_str = f"{op} {cat_info['bf']}"
 
         # To store probabilities for each type
         # types: All, clinical, clinical on stage s, effector, novel and repurposable
@@ -613,7 +625,8 @@ for pr in priors:
                 for metric, sdict in [('Genes_Per_Trait', gpt_stats), ('Traits_Per_Gene', tpg_stats)]:
                     for s_name, s_val in sdict.items():
                         count_hist_stats_list.append({
-                            'BayesFactor': cat, 'Prior': pr_str, 'Correction': corr, 'Type': tp,
+                            'BayesFactorCat': cat, 'BayesFactorVal': bf_val_str, 'Prior': pr_str,
+                            'Threshold': cat_threshold, 'Correction': corr, 'Type': tp,
                             'Metric': metric, 'Stat': s_name, 'Value': s_val
                         })
 
@@ -621,19 +634,26 @@ for pr in priors:
                 prob_stats = get_hist_stats(probs, is_count=False)
                 for s_name, s_val in prob_stats.items():
                     prob_hist_stats_list.append({
-                        'BayesFactor': cat, 'Prior': pr_str, 'Correction': corr, 'Type': tp,
+                        'BayesFactorCat': cat, 'BayesFactorVal': bf_val_str, 'Prior': pr_str,
+                        'Threshold': cat_threshold, 'Correction': corr, 'Type': tp,
                         'Metric': 'Probability', 'Stat': s_name, 'Value': s_val
                     })
 
                 # Plots
                 precalculated_count_hist_data[pr_str][corr][cat][tp] = {
                     'genes_per_trait': json.loads(create_histogram_json(genes_per_trait, f"Genes per Trait ({tp})", "Count", m_split)),
-            'traits_per_gene': json.loads(create_histogram_json(traits_per_gene, f"Traits per Gene ({tp})", "Count", m_split)),
-            'stats': {'gpt': gpt_stats, 'tpg': tpg_stats}
+                    'traits_per_gene': json.loads(create_histogram_json(traits_per_gene, f"Traits per Gene ({tp})", "Count", m_split)),
+                    'stats': {'gpt': gpt_stats, 'tpg': tpg_stats},
+                    'threshold': cat_threshold,
+                    'bf_cat': cat,
+                    'bf_val': bf_val_str
                 }
                 precalculated_prob_hist_data[pr_str][corr][cat][tp] = {
-            'prob_dist': json.loads(create_histogram_json(probs, f"Probability Distribution ({tp})", "Probability", m_split)),
-            'stats': {'prob': prob_stats}
+                    'prob_dist': json.loads(create_histogram_json(probs, f"Probability Distribution ({tp})", "Probability", m_split)),
+                    'stats': {'prob': prob_stats},
+                    'threshold': cat_threshold,
+                    'bf_cat': cat,
+                    'bf_val': bf_val_str
                 }
 
         # Top 3 Distributions
@@ -654,11 +674,11 @@ for pr in priors:
                 top_cat = sorted(cat_counts.items(), key=lambda x: x[1], reverse=True)[:3]
 
                 for rank, (name, count) in enumerate(top_g, 1):
-                    top_dist_list.append({"BayesFactor": cat, "Prior": pr_str, "Correction": corr_type, "Type": p_type, "Metric": "Gene", "Rank": rank, "Name": name, "Count": count})
+                    top_dist_list.append({"BayesFactorCat": cat, "BayesFactorVal": bf_val_str, "Prior": pr_str, "Threshold": cat_threshold, "Correction": corr_type, "Type": p_type, "Metric": "Gene", "Rank": rank, "Name": name, "Count": count})
                 for rank, (name, count) in enumerate(top_t, 1):
-                    top_dist_list.append({"BayesFactor": cat, "Prior": pr_str, "Correction": corr_type, "Type": p_type, "Metric": "Trait", "Rank": rank, "Name": name, "Count": count})
+                    top_dist_list.append({"BayesFactorCat": cat, "BayesFactorVal": bf_val_str, "Prior": pr_str, "Threshold": cat_threshold, "Correction": corr_type, "Type": p_type, "Metric": "Trait", "Rank": rank, "Name": name, "Count": count})
                 for rank, (name, count) in enumerate(top_cat, 1):
-                    top_dist_list.append({"BayesFactor": cat, "Prior": pr_str, "Correction": corr_type, "Type": p_type, "Metric": "Category", "Rank": rank, "Name": name, "Count": count})
+                    top_dist_list.append({"BayesFactorCat": cat, "BayesFactorVal": bf_val_str, "Prior": pr_str, "Threshold": cat_threshold, "Correction": corr_type, "Type": p_type, "Metric": "Category", "Rank": rank, "Name": name, "Count": count})
 
         # Main statistics for output_tsv
         # We need to add stats for ALL types (All, Clinical, Clinical_stage, Effector, Novel, Repurposable)
@@ -670,33 +690,33 @@ for pr in priors:
 
                 prefix = tp
                 if tp == 'All':
-                    add_stat("Total_Associated_Pairs", "Association_stats", corr, cat, pr_str, cat_threshold, pairs_count)
+                    add_stat("Total_Associated_Pairs", "Association_stats", corr, cat, bf_val_str, pr_str, cat_threshold, pairs_count)
 
                     avg_genes_per_trait = pairs_count / total_traits
-                    add_stat("Avg_Genes_Per_Trait", "Trait_stats", corr, cat, pr_str, cat_threshold, avg_genes_per_trait)
+                    add_stat("Avg_Genes_Per_Trait", "Trait_stats", corr, cat, bf_val_str, pr_str, cat_threshold, avg_genes_per_trait)
 
                     genetic_signal = avg_genes_per_trait / TOTAL_HUMAN_GENES
-                    add_stat("Genetic_signal", "Trait_stats", corr, cat, pr_str, cat_threshold, genetic_signal)
+                    add_stat("Genetic_signal", "Trait_stats", corr, cat, bf_val_str, pr_str, cat_threshold, genetic_signal)
 
                     tpg = [sum(trait_weights.get(t, 0) if corr == 'Bias_adjusted' else 1.0 for t in type_traits_per_gene[tp].get(g, set())) for g in gene_traits]
                     pleiotropic_genes = sum(1 for v in tpg if v >= 2)
-                    add_stat("Pleiotropic_Genes", "Gene_stats", corr, cat, pr_str, cat_threshold, pleiotropic_genes)
+                    add_stat("Pleiotropic_Genes", "Gene_stats", corr, cat, bf_val_str, pr_str, cat_threshold, pleiotropic_genes)
 
                     avg_traits_per_gene = pairs_count / TOTAL_HUMAN_GENES
-                    add_stat("Avg_Traits_Per_Gene", "Gene_stats", corr, cat, pr_str, cat_threshold, avg_traits_per_gene)
+                    add_stat("Avg_Traits_Per_Gene", "Gene_stats", corr, cat, bf_val_str, pr_str, cat_threshold, avg_traits_per_gene)
                 else:
                     # e.g. Clinical_Pairs, Avg_Clinical_Genes_Per_Trait, etc.
                     metric_pairs = f"{tp}_Pairs"
                     if tp == 'Novel': metric_pairs = "Novel_Pairs_Discovered"
                     if tp == 'Repurposable': metric_pairs = "Repurposable_Pairs"
 
-                    add_stat(metric_pairs, "Clinical_n_novelty", corr, cat, pr_str, cat_threshold, pairs_count)
+                    add_stat(metric_pairs, "Clinical_n_novelty", corr, cat, bf_val_str, pr_str, cat_threshold, pairs_count)
 
                     metric_gpt = f"Avg_{tp}_Genes_Per_Trait"
-                    add_stat(metric_gpt, "Clinical_n_novelty", corr, cat, pr_str, cat_threshold, pairs_count / total_traits)
+                    add_stat(metric_gpt, "Clinical_n_novelty", corr, cat, bf_val_str, pr_str, cat_threshold, pairs_count / total_traits)
 
                     metric_tpg = f"Avg_{tp}_Traits_Per_Gene"
-                    add_stat(metric_tpg, "Clinical_n_novelty", corr, cat, pr_str, cat_threshold, pairs_count / TOTAL_HUMAN_GENES)
+                    add_stat(metric_tpg, "Clinical_n_novelty", corr, cat, bf_val_str, pr_str, cat_threshold, pairs_count / TOTAL_HUMAN_GENES)
 
         # HTML Plot generation payload
         total_assoc_pairs_raw = len(type_pairs['All'])
@@ -738,19 +758,24 @@ for pr in priors:
                                                 "Phase", m_split, fill_color='rgba(228, 123, 43, 0.5)',
                                                 line_color='rgb(228, 123, 43)')
         }
-        precalculated_html_data[pr_str][cat] = {"plots": {k: json.loads(v) for k, v in plots.items()}, "threshold": cat_threshold}
+        precalculated_html_data[pr_str][cat] = {
+            "plots": {k: json.loads(v) for k, v in plots.items()},
+            "threshold": cat_threshold,
+            "bf_cat": cat,
+            "bf_val": bf_val_str
+        }
 
-        add_stat("Single_Gene_Loci", "Loci_stats", "Raw", cat, pr_str, cat_threshold, single_gene_loci_raw)
-        add_stat("Single_Gene_Loci", "Loci_stats", "Bias_adjusted", cat, pr_str, cat_threshold, single_gene_loci_adj)
-        add_stat("Top_Nearest_Gene_Loci", "Loci_stats", "Raw", cat, pr_str, cat_threshold, filt_true_raw)
-        add_stat("Top_Nearest_Gene_Loci", "Loci_stats", "Bias_adjusted", cat, pr_str, cat_threshold, filt_true_adj)
-        add_stat("Total_Associated_Genes", "Gene_stats", "Raw", cat, pr_str, cat_threshold, num_associated_genes)
+        add_stat("Single_Gene_Loci", "Loci_stats", "Raw", cat, bf_val_str, pr_str, cat_threshold, single_gene_loci_raw)
+        add_stat("Single_Gene_Loci", "Loci_stats", "Bias_adjusted", cat, bf_val_str, pr_str, cat_threshold, single_gene_loci_adj)
+        add_stat("Top_Nearest_Gene_Loci", "Loci_stats", "Raw", cat, bf_val_str, pr_str, cat_threshold, filt_true_raw)
+        add_stat("Top_Nearest_Gene_Loci", "Loci_stats", "Bias_adjusted", cat, bf_val_str, pr_str, cat_threshold, filt_true_adj)
+        add_stat("Total_Associated_Genes", "Gene_stats", "Raw", cat, bf_val_str, pr_str, cat_threshold, num_associated_genes)
         # Genes_Single_Trait
         tpg_all_raw = [len(type_traits_per_gene['All'].get(g, set())) for g in gene_traits]
-        add_stat("Genes_Single_Trait", "Gene_stats", "Raw", cat, pr_str, cat_threshold, tpg_all_raw.count(1))
+        add_stat("Genes_Single_Trait", "Gene_stats", "Raw", cat, bf_val_str, pr_str, cat_threshold, tpg_all_raw.count(1))
 
 stats_df = pd.DataFrame(stats_list,
-                        columns=["Metric_Name", "Type", "Correction", "cat", "pr_str", "Threshold", "Value"])
+                        columns=["Metric_Name", "Type", "Correction", "BayesFactorCat", "BayesFactorVal", "pr_str", "Threshold", "Value"])
 stats_df.to_csv(options.output_tsv, sep='\t', index=False)
 print(f"[LOG] Statistics TSV saved to {options.output_tsv}")
 
@@ -801,15 +826,15 @@ html_template = f"""
                 <option value="5.0" selected>Prior: 5%</option>
             </select>
             <select id="filterDropdown" onchange="updateDashboard()" style="padding: 6px; border-radius: 4px;">
-                <option value="Definitive">Definitive</option>
-                <option value="Overwhelming">Overwhelming</option>
-                <option value="Compelling">Compelling</option>
-                <option value="Extreme">Extreme</option>
-                <option value="Very_Strong">Very Strong</option>
-                <option value="Strong" selected>Strong</option>
-                <option value="Moderate">Moderate</option>
-                <option value="Anecdotal">Anecdotal</option>
-                <option value="No_Evidence">No Evidence</option>
+                <option value="Definitive">Definitive, >= 3162.3</option>
+                <option value="Overwhelming">Overwhelming, >= 1000.0</option>
+                <option value="Compelling">Compelling, >= 316.2</option>
+                <option value="Extreme">Extreme, >= 100.0</option>
+                <option value="Very_Strong">Very Strong, >= 31.6</option>
+                <option value="Strong" selected>Strong, >= 10.0</option>
+                <option value="Moderate">Moderate, >= 3.16</option>
+                <option value="Anecdotal">Anecdotal, > 1.0</option>
+                <option value="No_Evidence">No Evidence, <= 1.0</option>
             </select>
             <select id="countModeDropdown" onchange="updateDashboard()" style="padding: 6px; border-radius: 4px;">
                 <option value="raw" selected>Counts: Raw</option>
@@ -847,7 +872,7 @@ html_template = f"""
             if (!currentData) return;
 
             if (currentData.threshold !== undefined) {{
-                document.getElementById('thresholdDisplay').innerText = "Threshold: " + currentData.threshold.toFixed(4);
+                document.getElementById('thresholdDisplay').innerText = "Threshold: " + currentData.threshold.toFixed(4) + " (" + currentData.bf_cat + ", " + currentData.bf_val + ")";
             }}
 
             let plots = currentData.plots;
@@ -916,15 +941,15 @@ def generate_hist_html(data_json, title, output_file, is_prob=False):
             <option value="5.0" selected>Prior: 5%</option>
         </select>
         <select id="bfDropdown" onchange="updateTypes(); updatePlots()">
-            <option value="Definitive">Definitive</option>
-            <option value="Overwhelming">Overwhelming</option>
-            <option value="Compelling">Compelling</option>
-            <option value="Extreme">Extreme</option>
-            <option value="Very_Strong">Very Strong</option>
-            <option value="Strong" selected>Strong</option>
-            <option value="Moderate">Moderate</option>
-            <option value="Anecdotal">Anecdotal</option>
-            <option value="No_Evidence">No Evidence</option>
+            <option value="Definitive">Definitive, >= 3162.3</option>
+            <option value="Overwhelming">Overwhelming, >= 1000.0</option>
+            <option value="Compelling">Compelling, >= 316.2</option>
+            <option value="Extreme">Extreme, >= 100.0</option>
+            <option value="Very_Strong">Very Strong, >= 31.6</option>
+            <option value="Strong" selected>Strong, >= 10.0</option>
+            <option value="Moderate">Moderate, >= 3.16</option>
+            <option value="Anecdotal">Anecdotal, > 1.0</option>
+            <option value="No_Evidence">No Evidence, <= 1.0</option>
         </select>
         <select id="corrDropdown" onchange="updateTypes(); updatePlots()">
             <option value="Raw" selected>Raw</option>
@@ -979,16 +1004,17 @@ def generate_hist_html(data_json, title, output_file, is_prob=False):
             const corr = document.getElementById('corrDropdown').value;
             const tp = document.getElementById('typeDropdown').value;
 
-            if (mainData[pr] && mainData[pr][bf]) {{
-                document.getElementById('thresholdDisplay').innerText = "Threshold: " + mainData[pr][bf].threshold.toFixed(4);
-            }}
-
             const plotsDiv = document.getElementById('plots');
             const statsDiv = document.getElementById('stats_display');
             plotsDiv.innerHTML = '';
             statsDiv.innerHTML = '';
 
             const data = allData[pr][corr][bf][tp];
+            if (!data) return;
+
+            if (data.threshold !== undefined) {{
+                document.getElementById('thresholdDisplay').innerText = "Threshold: " + data.threshold.toFixed(4) + " (" + data.bf_cat + ", " + data.bf_val + ")";
+            }}
             if (!data) return;
 
             statsDiv.innerHTML = formatStats(data.stats);
