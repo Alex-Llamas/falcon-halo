@@ -481,12 +481,12 @@ def add_stat(metric, type_val, corr_val, cat_val, bf_val, prior_val, thresh_val,
     })
 
 
-add_stat("Total_Traits", "Trait_stats", "Raw", "N/A", "N/A", "N/A", "N/A", total_traits)
-add_stat("Total_Loci", "Loci_stats", "Raw", "N/A", "N/A", "N/A", "N/A", total_loci)
-add_stat("Total_Genes", "Gene_stats", "Raw", "N/A", "N/A", "N/A", "N/A", TOTAL_HUMAN_GENES)
-add_stat("Effective_Traits", "Trait_stats", "Corr_adjusted", "N/A", "N/A", "N/A", "N/A", n_eff_alt)
+add_stat("Total_Traits", "Trait_stats", "Raw", "NA", "NA", "NA", "NA", total_traits)
+add_stat("Total_Loci", "Loci_stats", "Raw", "NA", "NA", "NA", "NA", total_loci)
+add_stat("Total_Genes", "Gene_stats", "Raw", "NA", "NA", "NA", "NA", TOTAL_HUMAN_GENES)
+add_stat("Effective_Traits", "Trait_stats", "Corr_adjusted", "NA", "NA", "NA", "NA", n_eff_alt)
 for c, m_eff in meff_results.items():
-    add_stat("Effective_Traits", "Trait_stats", "Corr_adjusted", "N/A", "N/A", "N/A", c, m_eff)
+    add_stat("Effective_Traits", "Trait_stats", "Corr_adjusted", "NA", "NA", "NA", c, m_eff)
 
 precalculated_html_data = {}
 precalculated_count_hist_data = {}
@@ -501,27 +501,27 @@ prob_hist_stats_list = []
 
 # Add threshold-independent stats
 count_hist_stats_list.append({
-    'BayesFactorCat': 'N/A', 'BayesFactorVal': 'N/A', 'Prior': 'N/A',
-    'Threshold': 'N/A', 'Correction': 'N/A', 'Type': 'All',
-    'Metric': 'Total_Traits', 'Stat': 'N/A', 'Value': total_traits
+    'BayesFactorCat': 'NA', 'BayesFactorVal': 'NA', 'Prior': 'NA',
+    'Threshold': 'NA', 'Correction': 'NA', 'Type': 'All',
+    'Metric': 'Total_Traits', 'Stat': 'NA', 'Value': total_traits
 })
 count_hist_stats_list.append({
-    'BayesFactorCat': 'N/A', 'BayesFactorVal': 'N/A', 'Prior': 'N/A',
-    'Threshold': 'N/A', 'Correction': 'N/A', 'Type': 'All',
-    'Metric': 'Total_Genes', 'Stat': 'N/A', 'Value': TOTAL_HUMAN_GENES
+    'BayesFactorCat': 'NA', 'BayesFactorVal': 'NA', 'Prior': 'NA',
+    'Threshold': 'NA', 'Correction': 'NA', 'Type': 'All',
+    'Metric': 'Total_Genes', 'Stat': 'NA', 'Value': TOTAL_HUMAN_GENES
 })
 count_hist_stats_list.append({
-    'BayesFactorCat': 'N/A', 'BayesFactorVal': 'N/A', 'Prior': 'N/A',
-    'Threshold': 'N/A', 'Correction': 'N/A', 'Type': 'All',
-    'Metric': 'Total_Loci', 'Stat': 'N/A', 'Value': total_loci
+    'BayesFactorCat': 'NA', 'BayesFactorVal': 'NA', 'Prior': 'NA',
+    'Threshold': 'NA', 'Correction': 'NA', 'Type': 'All',
+    'Metric': 'Total_Loci', 'Stat': 'NA', 'Value': total_loci
 })
 
 # Add Effective_Traits for specific thresholds
 for c, m_eff in meff_results.items():
     count_hist_stats_list.append({
-        'BayesFactorCat': 'N/A', 'BayesFactorVal': 'N/A', 'Prior': 'N/A',
-        'Threshold': c, 'Correction': 'N/A', 'Type': 'All',
-        'Metric': 'Effective_Traits', 'Stat': 'N/A', 'Value': m_eff
+        'BayesFactorCat': 'NA', 'BayesFactorVal': 'NA', 'Prior': 'NA',
+        'Threshold': c, 'Correction': 'NA', 'Type': 'All',
+        'Metric': 'Effective_Traits', 'Stat': 'NA', 'Value': m_eff
     })
 
 for pr in priors:
@@ -631,12 +631,12 @@ for pr in priors:
         count_hist_stats_list.append({
             'BayesFactorCat': cat, 'BayesFactorVal': bf_val_str, 'Prior': pr_str,
             'Threshold': cat_threshold, 'Correction': 'Raw', 'Type': 'All',
-            'Metric': 'Single_Gene_Loci', 'Stat': 'N/A', 'Value': single_gene_loci_raw
+            'Metric': 'Single_Gene_Loci', 'Stat': 'NA', 'Value': single_gene_loci_raw
         })
         count_hist_stats_list.append({
             'BayesFactorCat': cat, 'BayesFactorVal': bf_val_str, 'Prior': pr_str,
             'Threshold': cat_threshold, 'Correction': 'Raw', 'Type': 'All',
-            'Metric': 'Top_Nearest_Gene_Loci', 'Stat': 'N/A', 'Value': filt_true_raw
+            'Metric': 'Top_Nearest_Gene_Loci', 'Stat': 'NA', 'Value': filt_true_raw
         })
 
         # Pre-calculate counts and probabilities for histograms and stats
