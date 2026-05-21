@@ -499,6 +499,31 @@ top_dist_list = []
 count_hist_stats_list = []
 prob_hist_stats_list = []
 
+# Add threshold-independent stats
+count_hist_stats_list.append({
+    'BayesFactorCat': 'N/A', 'BayesFactorVal': 'N/A', 'Prior': 'N/A',
+    'Threshold': 'N/A', 'Correction': 'N/A', 'Type': 'All',
+    'Metric': 'Total_Traits', 'Stat': 'N/A', 'Value': total_traits
+})
+count_hist_stats_list.append({
+    'BayesFactorCat': 'N/A', 'BayesFactorVal': 'N/A', 'Prior': 'N/A',
+    'Threshold': 'N/A', 'Correction': 'N/A', 'Type': 'All',
+    'Metric': 'Total_Genes', 'Stat': 'N/A', 'Value': TOTAL_HUMAN_GENES
+})
+count_hist_stats_list.append({
+    'BayesFactorCat': 'N/A', 'BayesFactorVal': 'N/A', 'Prior': 'N/A',
+    'Threshold': 'N/A', 'Correction': 'N/A', 'Type': 'All',
+    'Metric': 'Total_Loci', 'Stat': 'N/A', 'Value': total_loci
+})
+
+# Add Effective_Traits for specific thresholds
+for c, m_eff in meff_results.items():
+    count_hist_stats_list.append({
+        'BayesFactorCat': 'N/A', 'BayesFactorVal': 'N/A', 'Prior': 'N/A',
+        'Threshold': c, 'Correction': 'N/A', 'Type': 'All',
+        'Metric': 'Effective_Traits', 'Stat': 'N/A', 'Value': m_eff
+    })
+
 for pr in priors:
     pr_str = str(pr)
     precalculated_html_data[pr_str] = {}
@@ -601,6 +626,18 @@ for pr in priors:
             if is_novel:
                 clin_counts_raw[p_name]['novel'] += 1
                 clin_counts_adj[p_name]['novel'] += w
+
+        # Add threshold-dependent stats (Raw only)
+        count_hist_stats_list.append({
+            'BayesFactorCat': cat, 'BayesFactorVal': bf_val_str, 'Prior': pr_str,
+            'Threshold': cat_threshold, 'Correction': 'Raw', 'Type': 'All',
+            'Metric': 'Single_Gene_Loci', 'Stat': 'N/A', 'Value': single_gene_loci_raw
+        })
+        count_hist_stats_list.append({
+            'BayesFactorCat': cat, 'BayesFactorVal': bf_val_str, 'Prior': pr_str,
+            'Threshold': cat_threshold, 'Correction': 'Raw', 'Type': 'All',
+            'Metric': 'Top_Nearest_Gene_Loci', 'Stat': 'N/A', 'Value': filt_true_raw
+        })
 
         # Pre-calculate counts and probabilities for histograms and stats
         # corrections: Raw, Bias_adjusted
