@@ -484,9 +484,6 @@ def add_stat(metric, type_val, corr_val, cat_val, bf_val, prior_val, thresh_val,
 add_stat("Total_Traits", "Trait_stats", "Raw", "NA", "NA", "NA", "NA", total_traits)
 add_stat("Total_Loci", "Loci_stats", "Raw", "NA", "NA", "NA", "NA", total_loci)
 add_stat("Total_Genes", "Gene_stats", "Raw", "NA", "NA", "NA", "NA", TOTAL_HUMAN_GENES)
-add_stat("Effective_Traits", "Trait_stats", "Corr_adjusted", "NA", "NA", "NA", "NA", n_eff_alt)
-for c, m_eff in meff_results.items():
-    add_stat("Effective_Traits", "Trait_stats", "Corr_adjusted", "NA", "NA", "NA", c, m_eff)
 
 precalculated_html_data = {}
 precalculated_count_hist_data = {}
@@ -516,13 +513,12 @@ count_hist_stats_list.append({
     'Metric': 'Total_Loci', 'Stat': 'NA', 'Value': total_loci
 })
 
-# Add Effective_Traits for specific thresholds
-for c, m_eff in meff_results.items():
-    count_hist_stats_list.append({
-        'BayesFactorCat': 'NA', 'BayesFactorVal': 'NA', 'Prior': 'NA',
-        'Threshold': c, 'Correction': 'NA', 'Type': 'All',
-        'Metric': 'Effective_Traits', 'Stat': 'NA', 'Value': m_eff
-    })
+# Add Effective_Traits (Galwey) - reported once
+count_hist_stats_list.append({
+    'BayesFactorCat': 'NA', 'BayesFactorVal': 'NA', 'Prior': 'NA',
+    'Threshold': 'NA', 'Correction': 'NA', 'Type': 'All',
+    'Metric': 'Effective_Traits', 'Stat': 'galwey', 'Value': n_eff_alt
+})
 
 for pr in priors:
     pr_str = str(pr)
@@ -534,6 +530,20 @@ for pr in priors:
         cat_threshold = calc_threshold(cat, pr)
         op = cat_info["op"]
         bf_val_str = f"{op} {cat_info['bf']}"
+
+        # Calculate Effective Traits (Gao) for this threshold
+        # Find minimum Meff such that (sum of first Meff eigenvalues) / (total sum) >= cat_threshold
+        try:
+            m_eff_gao = np.where(cumulative_eig / sum_eig >= cat_threshold)[0][0] + 1
+        except IndexError:
+            # If cat_threshold is so high that no sum of eigenvalues reaches it (e.g. cat_threshold > 1)
+            m_eff_gao = len(sorted_eigenvalues)
+
+        count_hist_stats_list.append({
+            'BayesFactorCat': cat, 'BayesFactorVal': bf_val_str,
+            'Prior': pr_str, 'Threshold': cat_threshold, 'Correction': 'NA', 'Type': 'All',
+            'Metric': 'Effective_Traits', 'Stat': 'gao', 'Value': m_eff_gao
+        })
 
         # To store probabilities for each type
         # types: All, clinical, clinical on stage s, effector, novel and repurposable
