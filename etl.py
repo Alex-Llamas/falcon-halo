@@ -61,14 +61,14 @@ def process_trait(con, trait_name, trait_path, output_dir):
         "GENE_2": "VARCHAR",
         "LINK_SC_2": "DOUBLE",
         "GENE_3": "VARCHAR",
-        "LINK_SC_3": "DOUBLE",
+        "LINK_SC_3": "VARCHAR",
         "LINK_SC_S2G_genes": "VARCHAR",
         "S2G_scores": "VARCHAR",
         "NORM_BETA": "VARCHAR",
         "LOCAL_SIGMA_2": "DOUBLE",
         "LEAD_SNP": "VARCHAR",
         "NEAREST_GENE": "VARCHAR",
-        "NEAREST_DISTANCE": "BIGINT",
+        "NEAREST_DISTANCE": "VARCHAR",
         "CLUMP": "VARCHAR",
         "GWAS_Z": "DOUBLE",
         "GWAS_P": "DOUBLE",
@@ -99,10 +99,12 @@ def process_trait(con, trait_name, trait_path, output_dir):
         trait_output_dir.mkdir(parents=True, exist_ok=True)
 
         try:
+            # We use header=False and skip=1 because some pipeline outputs have
+            # malformed headers (e.g. fewer columns in header than in data).
             query = f"""
                 COPY (
                     SELECT *, '{trait_name}' as trait
-                    FROM read_csv({file_list}, sep='\t', header=True, columns={{{types_str}}}, auto_detect=False)
+                    FROM read_csv({file_list}, sep='\t', header=False, skip=1, columns={{{types_str}}}, auto_detect=False)
                 ) TO '{trait_output_dir / 'data.parquet'}' (FORMAT PARQUET, COMPRESSION 'SNAPPY')
             """
             con.execute(query)
