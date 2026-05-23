@@ -30,8 +30,8 @@ def mock_genomic_data(tmp_path):
         pegs_path.mkdir(parents=True)
         for chr in chromosomes:
             (pegs_path / f"pegs1.{chr}.genes").write_text(gene_content)
-            (pegs_path / f"pegs.{chr}.variants").write_text(variant_content)
-            (pegs_path / f"pegs.{chr}.v2g").write_text(v2g_content)
+            (pegs_path / f"pegs1.{chr}.variants").write_text(variant_content)
+            (pegs_path / f"pegs1.{chr}.v2g").write_text(v2g_content)
 
     return base_dir
 

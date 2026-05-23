@@ -163,6 +163,111 @@ async def get_trait_gene_comprehensive(trait_name: str, gene_name: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+# Light APIs
+@app.get("/api/v1/light/genes/{gene_name}")
+async def get_gene_light(gene_name: str):
+    try:
+        query = f"SELECT GENE, PROBABILITY, P_VALUE, trait FROM read_parquet('{GENES_PARQUET}') WHERE UPPER(GENE) = UPPER(?) AND PROBABILITY >= 0.01"
+        df = app.state.db.execute(query, [gene_name]).df()
+        if df.empty:
+            raise HTTPException(status_code=404, detail=f"Gene {gene_name} not found or doesn't meet probability threshold")
+        return df.to_dict(orient="records")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/v1/light/variants/{rsid}")
+async def get_variant_light(rsid: str):
+    try:
+        # We need to join with v2g to check v2g_value >= 0.01
+        query = f"""
+            SELECT
+                v.RSID, v.CHR, v.POS, v.PROBABILITY, v2g.Value AS v2g_value, v.trait
+            FROM read_parquet('{VARIANTS_PARQUET}') v
+            INNER JOIN read_parquet('{V2G_PARQUET}') v2g
+                ON UPPER(v.RSID) = UPPER(v2g.rsID) AND v.trait = v2g.trait
+            WHERE UPPER(v.RSID) = UPPER(?) AND v.PROBABILITY >= 0.01 AND v2g.Value >= 0.01
+        """
+        df = app.state.db.execute(query, [rsid]).df()
+        if df.empty:
+            raise HTTPException(status_code=404, detail=f"Variant {rsid} not found or doesn't meet thresholds")
+        return df.to_dict(orient="records")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/v1/light/genes/{gene_name}/comprehensive")
+async def get_gene_comprehensive_light(gene_name: str):
+    try:
+        gene_query = f"SELECT GENE, PROBABILITY, P_VALUE, trait FROM read_parquet('{GENES_PARQUET}') WHERE UPPER(GENE) = UPPER(?) AND PROBABILITY >= 0.01"
+        gene_df = app.state.db.execute(gene_query, [gene_name]).df()
+
+        if gene_df.empty:
+            raise HTTPException(status_code=404, detail=f"Gene {gene_name} not found or doesn't meet probability threshold")
+
+        join_query = f"""
+            SELECT
+                v.RSID, v.CHR, v.POS, v.PROBABILITY, v2g.Value AS v2g_value, v.trait
+            FROM read_parquet('{VARIANTS_PARQUET}') v
+            INNER JOIN read_parquet('{V2G_PARQUET}') v2g
+                ON UPPER(v.RSID) = UPPER(v2g.rsID) AND v.trait = v2g.trait
+            WHERE UPPER(v2g.Gene) = UPPER(?) AND v.PROBABILITY >= 0.01 AND v2g.Value >= 0.01
+        """
+        variants_df = app.state.db.execute(join_query, [gene_name]).df()
+
+        response = {
+            "gene": gene_name,
+            "traits": []
+        }
+
+        for _, gene_row in gene_df.iterrows():
+            trait = gene_row['trait']
+            trait_variants = variants_df[variants_df['trait'] == trait]
+
+            response["traits"].append({
+                "trait_name": trait,
+                "gene_data": gene_row.to_dict(),
+                "variants": trait_variants.to_dict(orient="records")
+            })
+
+        return response
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/v1/light/traits/{trait_name}/genes/{gene_name}/comprehensive")
+async def get_trait_gene_comprehensive_light(trait_name: str, gene_name: str):
+    try:
+        gene_query = f"SELECT GENE, PROBABILITY, P_VALUE, trait FROM read_parquet('{GENES_PARQUET}') WHERE UPPER(GENE) = UPPER(?) AND trait = ? AND PROBABILITY >= 0.01"
+        gene_df = app.state.db.execute(gene_query, [gene_name, trait_name]).df()
+
+        if gene_df.empty:
+            raise HTTPException(status_code=404, detail=f"Gene {gene_name} not found for trait {trait_name} or doesn't meet probability threshold")
+
+        join_query = f"""
+            SELECT
+                v.RSID, v.CHR, v.POS, v.PROBABILITY, v2g.Value AS v2g_value
+            FROM read_parquet('{VARIANTS_PARQUET}') v
+            INNER JOIN read_parquet('{V2G_PARQUET}') v2g
+                ON UPPER(v.RSID) = UPPER(v2g.rsID) AND v.trait = v2g.trait
+            WHERE UPPER(v2g.Gene) = UPPER(?) AND v.trait = ? AND v.PROBABILITY >= 0.01 AND v2g.Value >= 0.01
+        """
+        variants_df = app.state.db.execute(join_query, [gene_name, trait_name]).df()
+
+        return {
+            "trait_name": trait_name,
+            "gene_name": gene_name,
+            "gene_data": gene_df.iloc[0].to_dict(),
+            "variants": variants_df.to_dict(orient="records")
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)

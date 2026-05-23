@@ -71,3 +71,41 @@ def test_get_trait_gene_comprehensive(client):
     assert data["gene_name"] == "COMT"
     assert "gene_data" in data
     assert len(data["variants"]) > 0
+
+def test_get_gene_light(client):
+    response = client.get("/api/v1/light/genes/COMT")
+    assert response.status_code == 200
+    data = response.json()
+    assert len(data) > 0
+    # Check columns
+    assert set(data[0].keys()) == {"GENE", "PROBABILITY", "P_VALUE", "trait"}
+
+def test_get_variant_light(client):
+    response = client.get("/api/v1/light/variants/rs165722")
+    assert response.status_code == 200
+    data = response.json()
+    assert len(data) > 0
+    # Check columns
+    assert set(data[0].keys()) == {"RSID", "CHR", "POS", "PROBABILITY", "v2g_value", "trait"}
+
+def test_get_gene_comprehensive_light(client):
+    response = client.get("/api/v1/light/genes/COMT/comprehensive")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["gene"] == "COMT"
+    assert len(data["traits"]) > 0
+
+    trait_entry = data["traits"][0]
+    assert set(trait_entry["gene_data"].keys()) == {"GENE", "PROBABILITY", "P_VALUE", "trait"}
+    if len(trait_entry["variants"]) > 0:
+        assert set(trait_entry["variants"][0].keys()) == {"RSID", "CHR", "POS", "PROBABILITY", "v2g_value", "trait"}
+
+def test_get_trait_gene_comprehensive_light(client):
+    response = client.get("/api/v1/light/traits/T2D/genes/COMT/comprehensive")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["trait_name"] == "T2D"
+    assert data["gene_name"] == "COMT"
+    assert set(data["gene_data"].keys()) == {"GENE", "PROBABILITY", "P_VALUE", "trait"}
+    if len(data["variants"]) > 0:
+        assert set(data["variants"][0].keys()) == {"RSID", "CHR", "POS", "PROBABILITY", "v2g_value"}
