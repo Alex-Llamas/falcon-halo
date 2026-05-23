@@ -110,3 +110,17 @@ def get_comprehensive_gene(gene_symbol):
 if __name__ == "__main__":
     get_comprehensive_gene("COMT")
 ```
+
+## Testing
+
+The project includes a comprehensive test suite using `pytest`.
+
+Install test dependencies:
+```bash
+pip install pytest httpx
+```
+
+Run all tests:
+```bash
+PYTHONPATH=. pytest
+```
