@@ -87,6 +87,19 @@ curl http://localhost:8000/api/v1/genes/COMT/comprehensive
 curl http://localhost:8000/api/v1/traits/T2D/genes/COMT/comprehensive
 ```
 
+### 7. Light APIs (Optimized)
+Light versions of the endpoints that only return essential columns and apply filtering thresholds (`PROBABILITY >= 0.01` and `v2g_value >= 0.01`).
+
+Available at:
+- `GET /api/v1/light/genes/{gene_name}`
+- `GET /api/v1/light/variants/{rsid}`
+- `GET /api/v1/light/genes/{gene_name}/comprehensive`
+- `GET /api/v1/light/traits/{trait_name}/genes/{gene_name}/comprehensive`
+
+```bash
+curl http://localhost:8000/api/v1/light/genes/COMT/comprehensive
+```
+
 ## Consuming the API via Python
 
 You can use the `requests` library to interact with the API programmatically:

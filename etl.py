@@ -20,8 +20,8 @@ def process_trait(con, trait_name, trait_path, output_dir):
 
     patterns = {
         "genes": "pegs1.*.genes",
-        "variants": "pegs.*.variants",
-        "v2g": "pegs.*.v2g"
+        "variants": "pegs1.*.variants",
+        "v2g": "pegs1.*.v2g"
     }
 
     schema_genes = {
