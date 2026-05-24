@@ -85,12 +85,18 @@ def process_trait(con, trait_name, trait_path, output_dir):
     }
 
     for key, pattern in patterns.items():
-        files = list(pegs_path.glob(pattern))
+        # Only read chromosome files from 1 to 22
+        files = []
+        for chrom in range(1, 23):
+            # Substitute '*' with chrom in pattern
+            chr_pattern = pattern.replace("*", str(chrom))
+            files.extend(list(pegs_path.glob(chr_pattern)))
+
         if not files:
-            logging.warning(f"No files found for {key} in {pegs_path}")
+            logging.warning(f"No files found for {key} (Chr 1-22) in {pegs_path}")
             continue
 
-        logging.info(f"Processing {len(files)} {key} files for trait {trait_name}")
+        logging.info(f"Processing {len(files)} {key} files (Chr 1-22) for trait {trait_name}")
         schema = schema_genes if key == "genes" else schema_variants if key == "variants" else schema_v2g
         types_str = ", ".join([f"'{col}': '{dtype}'" for col, dtype in schema.items()])
         file_list = [str(f) for f in files]
