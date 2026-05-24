@@ -338,11 +338,6 @@
 
     <!-- Tissue Signature Setup Card -->
     <div id="signature-setup-card" class="card controls" style="display: none;">
-        <div class="control-group" style="flex-basis: 50%;">
-            <label for="base-url-input">API Base URL</label>
-            <input type="text" id="base-url-input" value="http://10.200.7.60:8000" style="width: 100%;">
-        </div>
-
         <div class="search-container">
             <div class="control-group">
                 <label for="phenotype-search-sig">Search Phenotype/Trait</label>
@@ -506,7 +501,6 @@
     const geneSearchInput = document.getElementById('gene-search');
     const geneAutocompleteList = document.getElementById('gene-autocomplete-list');
     const thresholdInput = document.getElementById('threshold-input');
-    const baseUrlInput = document.getElementById('base-url-input');
 
     const dataTypeSelect = document.getElementById('data-type-select');
     const aggregationSelect = document.getElementById('aggregation-select');
@@ -687,9 +681,8 @@
             if (apiType === 'global') {
                 url = ENRICHMENT_API + currentPhenotype.name;
             } else {
-                const baseUrl = baseUrlInput.value.replace(/\/$/, "");
                 const threshold = thresholdInput.value || 0.01;
-                url = `${baseUrl}/api/v1/traits/${currentPhenotype.name}/genes/${currentGene}/tissue_signature?threshold=${threshold}`;
+                url = `/api/v1/traits/${currentPhenotype.name}/genes/${currentGene}/tissue_signature?threshold=${threshold}`;
             }
 
             const res = await fetch(url, { signal: controller.signal });
