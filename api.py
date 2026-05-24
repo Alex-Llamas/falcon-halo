@@ -330,7 +330,7 @@ async def get_trait_gene_comprehensive_light(trait_name: str, gene_name: str):
 async def get_trait_gene_tissue_signature(
     trait_name: str,
     gene_name: str,
-    threshold: float = Query(0.1, description="Threshold for both gene and variant probabilities")
+    threshold: float = Query(0.1, description="Threshold for gene probability, variant probability, and v2g_value")
 ):
     try:
         # Check if genomic_regions table exists
@@ -339,7 +339,7 @@ async def get_trait_gene_tissue_signature(
         except:
             raise HTTPException(status_code=503, detail="Tissue signature data not loaded (ANTS_FOLDER missing or empty)")
 
-        # 1. Get filtered variants and their probabilities
+        # 1. Get filtered variants and their values
         # We need absolute position for join
         var_query = f"""
             WITH filtered_variants AS (
@@ -356,22 +356,23 @@ async def get_trait_gene_tissue_signature(
                 INNER JOIN read_parquet('{V2G_PARQUET}') v2g
                     ON UPPER(v.RSID) = UPPER(v2g.rsID) AND v.trait = v2g.trait
                 INNER JOIN read_parquet('{GENES_PARQUET}') g
-                    ON g.GENE = v2g.Gene AND g.trait = v.trait
+                    ON UPPER(g.GENE) = UPPER(v2g.Gene) AND g.trait = v.trait
                 WHERE UPPER(v2g.Gene) = UPPER(?)
                   AND v.trait = ?
                   AND v.PROBABILITY >= ?
                   AND g.PROBABILITY >= ?
+                  AND v2g.Value >= ?
             )
             SELECT
                 r.annotation, r.tissue, r.tissue_from_file,
-                SUM(fv.v2g_value * fv.PROBABILITY) AS signature_value
+                SUM(fv.v2g_value) AS signature_value
             FROM filtered_variants fv
             INNER JOIN genomic_regions r
                 ON fv.abs_pos >= r.abs_start AND fv.abs_pos <= r.abs_end
             GROUP BY r.annotation, r.tissue, r.tissue_from_file
             ORDER BY signature_value DESC
         """
-        df = app.state.db.execute(var_query, [gene_name, trait_name, threshold, threshold]).df()
+        df = app.state.db.execute(var_query, [gene_name, trait_name, threshold, threshold, threshold]).df()
         return df.to_dict(orient="records")
     except HTTPException:
         raise
@@ -382,7 +383,7 @@ async def get_trait_gene_tissue_signature(
 @app.get("/api/v1/genes/{gene_name}/tissue_signature")
 async def get_gene_tissue_signature(
     gene_name: str,
-    threshold: float = Query(0.1, description="Threshold for both gene and variant probabilities")
+    threshold: float = Query(0.1, description="Threshold for gene probability, variant probability, and v2g_value")
 ):
     try:
         try:
@@ -405,21 +406,22 @@ async def get_gene_tissue_signature(
                 INNER JOIN read_parquet('{V2G_PARQUET}') v2g
                     ON UPPER(v.RSID) = UPPER(v2g.rsID) AND v.trait = v2g.trait
                 INNER JOIN read_parquet('{GENES_PARQUET}') g
-                    ON g.GENE = v2g.Gene AND g.trait = v.trait
+                    ON UPPER(g.GENE) = UPPER(v2g.Gene) AND g.trait = v.trait
                 WHERE UPPER(v2g.Gene) = UPPER(?)
                   AND v.PROBABILITY >= ?
                   AND g.PROBABILITY >= ?
+                  AND v2g.Value >= ?
             )
             SELECT
                 r.annotation, r.tissue, r.tissue_from_file,
-                SUM(fv.v2g_value * fv.PROBABILITY) AS signature_value
+                SUM(fv.v2g_value) AS signature_value
             FROM filtered_variants fv
             INNER JOIN genomic_regions r
                 ON fv.abs_pos >= r.abs_start AND fv.abs_pos <= r.abs_end
             GROUP BY r.annotation, r.tissue, r.tissue_from_file
             ORDER BY signature_value DESC
         """
-        df = app.state.db.execute(var_query, [gene_name, threshold, threshold]).df()
+        df = app.state.db.execute(var_query, [gene_name, threshold, threshold, threshold]).df()
         return df.to_dict(orient="records")
     except HTTPException:
         raise
