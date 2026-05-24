@@ -300,6 +300,7 @@
             <select id="api-type-select">
                 <option value="global">Global Enrichment (BioIndex)</option>
                 <option value="signature">Tissue Signature API</option>
+                <option value="precomputed">Precomputed Signatures</option>
             </select>
         </div>
     </div>
@@ -362,6 +363,57 @@
         <div class="control-group">
             <label for="timeout-input">Timeout (s)</label>
             <input type="number" id="timeout-input" step="1" value="10" min="1">
+        </div>
+    </div>
+
+    <!-- Precomputed Signatures Setup Card -->
+    <div id="precomputed-setup-card" class="card controls" style="display: none;">
+        <div class="control-group">
+            <label>Mode</label>
+            <div class="toggle-container">
+                <span>Global</span>
+                <label class="switch">
+                    <input type="checkbox" id="precomputed-mode-toggle" checked>
+                    <span class="slider"></span>
+                </label>
+                <span>Per Trait</span>
+            </div>
+        </div>
+
+        <div class="search-container">
+            <div class="control-group">
+                <label for="gene-search-pre">Search Gene</label>
+                <input type="text" id="gene-search-pre" class="gene-input" placeholder="Type to search (e.g. GALNT2)...">
+                <div id="gene-autocomplete-list-pre" class="autocomplete-dropdown gene-autocomplete-list"></div>
+            </div>
+        </div>
+
+        <div class="search-container" id="precomputed-phenotype-container">
+            <div class="control-group">
+                <label for="phenotype-search-pre">Search Phenotype/Trait</label>
+                <input type="text" id="phenotype-search-pre" class="phenotype-input" placeholder="Type to search...">
+                <div class="autocomplete-dropdown autocomplete-list"></div>
+            </div>
+        </div>
+
+        <div class="control-group" id="precomputed-annotation-container">
+            <label for="precomputed-annotation-select">Annotation</label>
+            <select id="precomputed-annotation-select" class="precomputed-annotation-select">
+                <option value="All">All</option>
+                <option value="accessible_chromatin">Accessible Chromatin</option>
+                <option value="enhancer">Enhancer</option>
+                <option value="promoter">Promoter</option>
+                <option value="binding_sites">Binding Sites</option>
+            </select>
+        </div>
+
+        <div class="control-group" id="precomputed-aggregation-container" style="display: none;">
+            <label for="precomputed-aggregation-select">Aggregation</label>
+            <select id="precomputed-aggregation-select">
+                <option value="sum">Sum</option>
+                <option value="avg">Average</option>
+                <option value="max">Max</option>
+            </select>
         </div>
     </div>
 
@@ -496,8 +548,16 @@
     const apiTypeSelect = document.getElementById('api-type-select');
     const globalSetupCard = document.getElementById('global-setup-card');
     const signatureSetupCard = document.getElementById('signature-setup-card');
+    const precomputedSetupCard = document.getElementById('precomputed-setup-card');
     const phenotypeInputs = document.querySelectorAll('.phenotype-input');
     const autocompleteLists = document.querySelectorAll('.autocomplete-list');
+    const geneInputs = document.querySelectorAll('.gene-input');
+    const geneAutocompleteLists = document.querySelectorAll('.gene-autocomplete-list');
+    const precomputedModeToggle = document.getElementById('precomputed-mode-toggle');
+    const precomputedPhenotypeContainer = document.getElementById('precomputed-phenotype-container');
+    const precomputedAggregationContainer = document.getElementById('precomputed-aggregation-container');
+    const precomputedAggregationSelect = document.getElementById('precomputed-aggregation-select');
+    const precomputedAnnotationSelect = document.getElementById('precomputed-annotation-select');
     const geneSearchInput = document.getElementById('gene-search');
     const geneAutocompleteList = document.getElementById('gene-autocomplete-list');
     const thresholdInput = document.getElementById('threshold-input');
@@ -574,65 +634,80 @@
             });
         });
 
-        geneSearchInput.addEventListener('input', async () => {
-            const val = geneSearchInput.value;
-            geneAutocompleteList.innerHTML = '';
-            if (val.length < 2) {
-                geneAutocompleteList.style.display = 'none';
-                return;
-            }
-
-            try {
-                const res = await fetch(GENE_MATCH_API + val);
-                const data = await res.json();
-                const matchedGenes = data.data || [];
-
-                if (matchedGenes.length > 0) {
-                    matchedGenes.slice(0, 10).forEach(gene => {
-                        const div = document.createElement('div');
-                        div.className = 'autocomplete-item';
-                        div.textContent = gene;
-                        div.addEventListener('click', () => {
-                            selectGene(gene);
-                        });
-                        geneAutocompleteList.appendChild(div);
-                    });
-                    geneAutocompleteList.style.display = 'block';
-                } else {
-                    geneAutocompleteList.style.display = 'none';
+        geneInputs.forEach((input, index) => {
+            const list = geneAutocompleteLists[index];
+            input.addEventListener('input', async () => {
+                const val = input.value;
+                list.innerHTML = '';
+                if (val.length < 2) {
+                    list.style.display = 'none';
+                    return;
                 }
-            } catch (error) {
-                console.error("Gene search failed:", error);
-            }
+
+                try {
+                    const res = await fetch(GENE_MATCH_API + val);
+                    const data = await res.json();
+                    const matchedGenes = data.data || [];
+
+                    if (matchedGenes.length > 0) {
+                        matchedGenes.slice(0, 10).forEach(gene => {
+                            const div = document.createElement('div');
+                            div.className = 'autocomplete-item';
+                            div.textContent = gene;
+                            div.addEventListener('click', () => {
+                                selectGene(gene);
+                            });
+                            list.appendChild(div);
+                        });
+                        list.style.display = 'block';
+                    } else {
+                        list.style.display = 'none';
+                    }
+                } catch (error) {
+                    console.error("Gene search failed:", error);
+                }
+            });
         });
 
         document.addEventListener('click', (e) => {
             if (!e.target.classList.contains('phenotype-input')) {
                 autocompleteLists.forEach(list => list.style.display = 'none');
             }
-            if (e.target !== geneSearchInput) {
-                geneAutocompleteList.style.display = 'none';
+            if (!e.target.classList.contains('gene-input')) {
+                geneAutocompleteLists.forEach(list => list.style.display = 'none');
             }
         });
     }
 
     function setupControls() {
         apiTypeSelect.addEventListener('change', () => {
-            const isGlobal = apiTypeSelect.value === 'global';
-            globalSetupCard.style.display = isGlobal ? 'flex' : 'none';
-            signatureSetupCard.style.display = isGlobal ? 'none' : 'flex';
-            document.getElementById('data-type-control').style.display = isGlobal ? 'flex' : 'none';
-            document.getElementById('min-enrichment-label').textContent = isGlobal ? 'Min Enrichment' : 'Min Signature';
+            const apiType = apiTypeSelect.value;
+            globalSetupCard.style.display = apiType === 'global' ? 'flex' : 'none';
+            signatureSetupCard.style.display = apiType === 'signature' ? 'flex' : 'none';
+            precomputedSetupCard.style.display = apiType === 'precomputed' ? 'flex' : 'none';
+
+            document.getElementById('data-type-control').style.display = apiType === 'global' ? 'flex' : 'none';
+            document.getElementById('min-enrichment-label').textContent = apiType === 'global' ? 'Min Enrichment' : (apiType === 'precomputed' ? 'Min Value' : 'Min Signature');
 
             // Clear current data when switching APIs
             enrichmentData = [];
             currentPhenotype = null;
             currentGene = null;
             phenotypeInputs.forEach(input => input.value = '');
-            geneSearchInput.value = '';
+            geneInputs.forEach(input => input.value = '');
             updateVisualization();
             renderTable();
         });
+
+        precomputedModeToggle.addEventListener('change', () => {
+            const isPerTrait = precomputedModeToggle.checked;
+            precomputedPhenotypeContainer.style.display = isPerTrait ? 'block' : 'none';
+            precomputedAggregationContainer.style.display = isPerTrait ? 'none' : 'block';
+            fetchData();
+        });
+
+        precomputedAggregationSelect.addEventListener('change', fetchData);
+        precomputedAnnotationSelect.addEventListener('change', fetchData);
 
         dataTypeSelect.addEventListener('change', updateVisualization);
         ancestrySelect.addEventListener('change', () => { currentPage = 1; updateVisualization(); renderTable(); });
@@ -660,8 +735,8 @@
 
     async function selectGene(gene) {
         currentGene = gene;
-        geneSearchInput.value = gene;
-        geneAutocompleteList.style.display = 'none';
+        geneInputs.forEach(input => input.value = gene);
+        geneAutocompleteLists.forEach(list => list.style.display = 'none');
         fetchData();
     }
 
@@ -680,9 +755,25 @@
             let url;
             if (apiType === 'global') {
                 url = ENRICHMENT_API + currentPhenotype.name;
-            } else {
+            } else if (apiType === 'signature') {
                 const threshold = thresholdInput.value || 0.01;
                 url = `/api/v1/traits/${currentPhenotype.name}/genes/${currentGene}/tissue_signature?threshold=${threshold}`;
+            } else if (apiType === 'precomputed') {
+                const isPerTrait = precomputedModeToggle.checked;
+                const ann = precomputedAnnotationSelect.value;
+                url = `/api/v1/precomputed_signatures/gene/${currentGene}?`;
+                if (isPerTrait && currentPhenotype) {
+                    url += `trait=${currentPhenotype.name}&`;
+                } else if (isPerTrait && !currentPhenotype) {
+                    showLoading(false);
+                    return;
+                }
+                if (ann !== 'All') {
+                    url += `annotation=${ann}&`;
+                }
+                if (!isPerTrait) {
+                    url += `aggregation=${precomputedAggregationSelect.value}&`;
+                }
             }
 
             const res = await fetch(url, { signal: controller.signal });
@@ -700,7 +791,7 @@
                     ...d,
                     baseTissue: d.tissue.split('___').pop()
                 }));
-            } else {
+            } else if (apiType === 'signature') {
                 // Signature API returns an array directly
                 enrichmentData = data.map(d => ({
                     ...d,
@@ -708,6 +799,14 @@
                     pValue: 0, // Not available in signature API
                     ancestry: 'N/A', // Not available in signature API
                     baseTissue: d.tissue_from_file
+                }));
+            } else if (apiType === 'precomputed') {
+                enrichmentData = data.map(d => ({
+                    ...d,
+                    enrichment: d.signature_value,
+                    pValue: 0,
+                    ancestry: 'N/A',
+                    baseTissue: d.tissue
                 }));
             }
             updateVisualization();

@@ -10,7 +10,47 @@ def get_args():
     parser = argparse.ArgumentParser(description="ETL pipeline for genomic data.")
     parser.add_argument("--base-dir", default="/humgen/diabetes/loki/pipelines/real_data/kp5/projects/bottom-line/", help="Base directory to scan for traits.")
     parser.add_argument("--output-dir", default="./parquet_db/", help="Output directory for Parquet files.")
+    parser.add_argument("--signature-matrix", help="Path to pre-computed tissue signature matrix TSV.")
     return parser.parse_args()
+
+def process_signature_matrix(con, matrix_path, output_dir):
+    matrix_path = Path(matrix_path)
+    if not matrix_path.exists():
+        logging.error(f"Signature matrix file not found: {matrix_path}")
+        return
+
+    logging.info(f"Processing signature matrix: {matrix_path}")
+
+    target_dir = Path(output_dir) / "precomputed_signatures"
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        # Columns in TSV: gene, trait, annotation___tissue, biosample, value
+        # We split annotation___tissue and ignore biosample
+        query = f"""
+            COPY (
+                SELECT
+                    gene,
+                    trait,
+                    split_part("annotation___tissue", '___', 1) AS annotation,
+                    split_part("annotation___tissue", '___', 2) AS tissue,
+                    value
+                FROM read_csv('{matrix_path}',
+                    header=True,
+                    sep='\t',
+                    columns={{
+                        'gene': 'VARCHAR',
+                        'trait': 'VARCHAR',
+                        'annotation___tissue': 'VARCHAR',
+                        'biosample': 'VARCHAR',
+                        'value': 'DOUBLE'
+                    }})
+            ) TO '{target_dir}' (FORMAT PARQUET, PARTITION_BY (gene), COMPRESSION 'SNAPPY', OVERWRITE_OR_IGNORE)
+        """
+        con.execute(query)
+        logging.info(f"Signature matrix processed and saved to {target_dir}")
+    except Exception as e:
+        logging.error(f"Error processing signature matrix: {e}")
 
 def process_trait(con, trait_name, trait_path, output_dir):
     pegs_path = trait_path / "1000G" / "no_filter" / "default" / "pegs"
@@ -125,16 +165,21 @@ def main():
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    if not base_dir.exists():
-        logging.error(f"Base directory {base_dir} does not exist.")
-        return
-
     con = duckdb.connect(database=':memory:')
-    for trait_path in base_dir.iterdir():
-        if trait_path.is_dir():
-            trait_name = trait_path.name
-            logging.info(f"Starting ETL for trait: {trait_name}")
-            process_trait(con, trait_name, trait_path, output_dir)
+
+    # Process traits if base_dir exists and contains directories
+    if base_dir.exists():
+        for trait_path in base_dir.iterdir():
+            if trait_path.is_dir():
+                trait_name = trait_path.name
+                logging.info(f"Starting ETL for trait: {trait_name}")
+                process_trait(con, trait_name, trait_path, output_dir)
+    else:
+        logging.warning(f"Base directory {base_dir} does not exist. Skipping trait processing.")
+
+    # Process signature matrix if provided
+    if args.signature_matrix:
+        process_signature_matrix(con, args.signature_matrix, output_dir)
 
     logging.info("ETL process completed.")
 
