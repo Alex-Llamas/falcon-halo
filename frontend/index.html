@@ -363,6 +363,11 @@
             <label for="threshold-input">Threshold</label>
             <input type="number" id="threshold-input" step="0.01" value="0.01" placeholder="0.01">
         </div>
+
+        <div class="control-group">
+            <label for="timeout-input">Timeout (s)</label>
+            <input type="number" id="timeout-input" step="1" value="10" min="1">
+        </div>
     </div>
 
     <!-- Common Controls Card -->
@@ -672,6 +677,10 @@
         const apiType = apiTypeSelect.value;
         if (apiType === 'signature' && !currentGene) return;
 
+        const timeout = parseInt(document.getElementById('timeout-input').value) || 10;
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), timeout * 1000);
+
         showLoading(true);
         try {
             let url;
@@ -683,7 +692,14 @@
                 url = `${baseUrl}/api/v1/traits/${currentPhenotype.name}/genes/${currentGene}/tissue_signature?threshold=${threshold}`;
             }
 
-            const res = await fetch(url);
+            const res = await fetch(url, { signal: controller.signal });
+            clearTimeout(timeoutId);
+
+            if (!res.ok) {
+                const errorData = await res.json().catch(() => ({ detail: "Unknown error" }));
+                throw new Error(errorData.detail || `API Error: ${res.status}`);
+            }
+
             const data = await res.json();
 
             if (apiType === 'global') {
@@ -704,7 +720,14 @@
             updateVisualization();
             renderTable();
         } catch (error) {
-            console.error("Failed to fetch data:", error);
+            clearTimeout(timeoutId);
+            if (error.name === 'AbortError') {
+                alert(`Request timed out after ${timeout} seconds`);
+                console.error("Request timed out");
+            } else {
+                console.error("Failed to fetch data:", error);
+                alert(`Error: ${error.message}`);
+            }
             enrichmentData = [];
             updateVisualization();
             renderTable();

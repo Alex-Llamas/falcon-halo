@@ -1,4 +1,5 @@
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.staticfiles import StaticFiles
 from contextlib import asynccontextmanager
 import duckdb
 import os
@@ -428,6 +429,9 @@ async def get_gene_tissue_signature(
     except Exception as e:
         logging.error(f"Error in gene tissue_signature: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+# Serve static files from the frontend directory
+app.mount("/", StaticFiles(directory="frontend", html=True), name="frontend")
 
 if __name__ == "__main__":
     import uvicorn
