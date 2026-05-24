@@ -100,6 +100,16 @@ Available at:
 curl http://localhost:8000/api/v1/light/genes/COMT/comprehensive
 ```
 
+### 8. Tissue Signature APIs
+Calculates the tissue signature for a gene by summing `v2g_value * probability` for all variants falling within genomic regions of specific tissues.
+
+- `GET /api/v1/traits/{trait_name}/genes/{gene_name}/tissue_signature?threshold=0.1`
+- `GET /api/v1/genes/{gene_name}/tissue_signature?threshold=0.1`
+
+```bash
+curl "http://localhost:8000/api/v1/genes/COMT/tissue_signature?threshold=0.01"
+```
+
 ## Consuming the API via Python
 
 You can use the `requests` library to interact with the API programmatically:

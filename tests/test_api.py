@@ -3,9 +3,10 @@ from fastapi.testclient import TestClient
 import os
 
 @pytest.fixture
-def client(parquet_db):
-    """Provides a TestClient for the FastAPI app, pointing to the test database."""
+def client(parquet_db, ants_folder):
+    """Provides a TestClient for the FastAPI app, pointing to the test database and ANTS_FOLDER."""
     os.environ["PARQUET_DIR"] = str(parquet_db)
+    os.environ["ANTS_FOLDER"] = str(ants_folder)
     from api import app
     with TestClient(app) as c:
         yield c
@@ -109,3 +110,19 @@ def test_get_trait_gene_comprehensive_light(client):
     assert set(data["gene_data"].keys()) == {"GENE", "PROBABILITY", "P_VALUE", "trait"}
     if len(data["variants"]) > 0:
         assert set(data["variants"][0].keys()) == {"RSID", "CHR", "POS", "PROBABILITY", "v2g_value"}
+
+def test_get_trait_gene_tissue_signature(client):
+    response = client.get("/api/v1/traits/T2D/genes/COMT/tissue_signature?threshold=0.01")
+    assert response.status_code == 200
+    data = response.json()
+    assert len(data) > 0
+    assert "signature_value" in data[0]
+    assert data[0]["tissue"] == "vagina"
+
+def test_get_gene_tissue_signature(client):
+    response = client.get("/api/v1/genes/COMT/tissue_signature?threshold=0.01")
+    assert response.status_code == 200
+    data = response.json()
+    assert len(data) > 0
+    assert "signature_value" in data[0]
+    assert data[0]["tissue"] == "vagina"

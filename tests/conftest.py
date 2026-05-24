@@ -36,6 +36,19 @@ def mock_genomic_data(tmp_path):
     return base_dir
 
 @pytest.fixture
+def ants_folder(tmp_path):
+    """Creates a mock ANTS_FOLDER with sample tissue CSV files."""
+    ants_dir = tmp_path / "ants_folder"
+    ants_dir.mkdir()
+
+    # Filename format: {annotation}___{tissue}.csv
+    # Content: chr, start, end, label, tissue, ...
+    tissue_content = "22\t19948000\t19950000\tTssA\tvagina\tChromHMM\n"
+    (ants_dir / "ChromHMM___vagina.csv").write_text(tissue_content)
+
+    return ants_dir
+
+@pytest.fixture
 def parquet_db(mock_genomic_data, tmp_path):
     """Runs ETL on mock data and returns the output directory."""
     from etl import process_trait

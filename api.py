@@ -11,6 +11,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 
 # Constants
 PARQUET_DIR = os.getenv("PARQUET_DIR", "./parquet_db/")
+ANTS_FOLDER = os.getenv("ANTS_FOLDER", "/humgen/diabetes/loki/data/annotation/common/ATACseq/")
 GENES_PARQUET = str(Path(PARQUET_DIR) / "genes.parquet/**/*.parquet")
 VARIANTS_PARQUET = str(Path(PARQUET_DIR) / "variants.parquet/**/*.parquet")
 V2G_PARQUET = str(Path(PARQUET_DIR) / "v2g.parquet/**/*.parquet")
@@ -20,6 +21,63 @@ async def lifespan(app: FastAPI):
     # Initialize DuckDB connection
     logging.info("Initializing DuckDB connection")
     app.state.db = duckdb.connect(database=':memory:')
+
+    # Pre-compute/Load genomic regions if ANTS_FOLDER exists
+    if Path(ANTS_FOLDER).exists():
+        logging.info(f"Loading genomic regions from {ANTS_FOLDER}")
+        try:
+            # We use filename=True to extract annotation and tissue from the filename
+            # Filename format: {annotation}___{tissue}.csv
+            # We use list of files to read_csv
+            csv_files = [str(f) for f in Path(ANTS_FOLDER).glob("*.csv")]
+            if csv_files:
+                # Create a table for genomic regions
+                # Column 0: chr, 1: start, 2: end, 4: tissue (from file content)
+                app.state.db.execute(f"""
+                    CREATE TABLE genomic_regions_raw AS
+                    SELECT
+                        column0 AS chr,
+                        column1 AS start,
+                        column2 AS end,
+                        column4 AS tissue,
+                        regexp_extract(filename, '([^/]+)___([^/.]+)\\.csv$', 1) AS annotation,
+                        regexp_extract(filename, '([^/]+)___([^/.]+)\\.csv$', 2) AS tissue_from_file
+                    FROM read_csv({csv_files}, sep='\t', header=False, filename=True, all_varchar=True)
+                """)
+                # Handle Chromosome mapping as in example and compute absolute positions
+                # Using double quotes around reserved keyword "end"
+                app.state.db.execute("""
+                    CREATE TABLE genomic_regions AS
+                    SELECT
+                        annotation, tissue, tissue_from_file,
+                        CAST("start" AS BIGINT) + (
+                            CASE
+                                WHEN chr = 'X' THEN 23
+                                WHEN chr = 'Y' THEN 24
+                                WHEN chr = 'MT' THEN 25
+                                ELSE TRY_CAST(chr AS BIGINT)
+                            END * CAST(1000000000 AS BIGINT)
+                        ) AS abs_start,
+                        CAST("end" AS BIGINT) + (
+                            CASE
+                                WHEN chr = 'X' THEN 23
+                                WHEN chr = 'Y' THEN 24
+                                WHEN chr = 'MT' THEN 25
+                                ELSE TRY_CAST(chr AS BIGINT)
+                            END * CAST(1000000000 AS BIGINT)
+                        ) AS abs_end
+                    FROM genomic_regions_raw;
+                    CREATE INDEX idx_abs_pos ON genomic_regions (abs_start, abs_end);
+                    DROP TABLE genomic_regions_raw;
+                """)
+                logging.info("Genomic regions loaded successfully.")
+            else:
+                logging.warning(f"No CSV files found in {ANTS_FOLDER}")
+        except Exception as e:
+            logging.error(f"Failed to load genomic regions: {e}")
+    else:
+        logging.warning(f"ANTS_FOLDER {ANTS_FOLDER} does not exist. Tissue signature APIs will be unavailable.")
+
     yield
     logging.info("Closing DuckDB connection")
     app.state.db.close()
@@ -266,6 +324,109 @@ async def get_trait_gene_comprehensive_light(trait_name: str, gene_name: str):
     except HTTPException:
         raise
     except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/v1/traits/{trait_name}/genes/{gene_name}/tissue_signature")
+async def get_trait_gene_tissue_signature(
+    trait_name: str,
+    gene_name: str,
+    threshold: float = Query(0.1, description="Threshold for gene probability, variant probability, and v2g_value")
+):
+    try:
+        # Check if genomic_regions table exists
+        try:
+            app.state.db.execute("SELECT 1 FROM genomic_regions LIMIT 1")
+        except:
+            raise HTTPException(status_code=503, detail="Tissue signature data not loaded (ANTS_FOLDER missing or empty)")
+
+        # 1. Get filtered variants and their values
+        # We need absolute position for join
+        var_query = f"""
+            WITH filtered_variants AS (
+                SELECT
+                    v.RSID, v.CHR, v.POS, v.PROBABILITY, v2g.Value AS v2g_value,
+                    CASE
+                        WHEN v.CHR = 'X' THEN 23
+                        WHEN v.CHR = 'Y' THEN 24
+                        WHEN v.CHR = 'MT' THEN 25
+                        ELSE TRY_CAST(v.CHR AS BIGINT)
+                    END AS chr_num,
+                    CAST(v.POS AS BIGINT) + (chr_num * CAST(1000000000 AS BIGINT)) AS abs_pos
+                FROM read_parquet('{VARIANTS_PARQUET}') v
+                INNER JOIN read_parquet('{V2G_PARQUET}') v2g
+                    ON UPPER(v.RSID) = UPPER(v2g.rsID) AND v.trait = v2g.trait
+                INNER JOIN read_parquet('{GENES_PARQUET}') g
+                    ON UPPER(g.GENE) = UPPER(v2g.Gene) AND g.trait = v.trait
+                WHERE UPPER(v2g.Gene) = UPPER(?)
+                  AND v.trait = ?
+                  AND v.PROBABILITY >= ?
+                  AND g.PROBABILITY >= ?
+                  AND v2g.Value >= ?
+            )
+            SELECT
+                r.annotation, r.tissue, r.tissue_from_file,
+                SUM(fv.v2g_value) AS signature_value
+            FROM filtered_variants fv
+            INNER JOIN genomic_regions r
+                ON fv.abs_pos >= r.abs_start AND fv.abs_pos <= r.abs_end
+            GROUP BY r.annotation, r.tissue, r.tissue_from_file
+            ORDER BY signature_value DESC
+        """
+        df = app.state.db.execute(var_query, [gene_name, trait_name, threshold, threshold, threshold]).df()
+        return df.to_dict(orient="records")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.error(f"Error in tissue_signature: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/v1/genes/{gene_name}/tissue_signature")
+async def get_gene_tissue_signature(
+    gene_name: str,
+    threshold: float = Query(0.1, description="Threshold for gene probability, variant probability, and v2g_value")
+):
+    try:
+        try:
+            app.state.db.execute("SELECT 1 FROM genomic_regions LIMIT 1")
+        except:
+            raise HTTPException(status_code=503, detail="Tissue signature data not loaded (ANTS_FOLDER missing or empty)")
+
+        var_query = f"""
+            WITH filtered_variants AS (
+                SELECT
+                    v.RSID, v.CHR, v.POS, v.PROBABILITY, v2g.Value AS v2g_value,
+                    CASE
+                        WHEN v.CHR = 'X' THEN 23
+                        WHEN v.CHR = 'Y' THEN 24
+                        WHEN v.CHR = 'MT' THEN 25
+                        ELSE TRY_CAST(v.CHR AS BIGINT)
+                    END AS chr_num,
+                    CAST(v.POS AS BIGINT) + (chr_num * CAST(1000000000 AS BIGINT)) AS abs_pos
+                FROM read_parquet('{VARIANTS_PARQUET}') v
+                INNER JOIN read_parquet('{V2G_PARQUET}') v2g
+                    ON UPPER(v.RSID) = UPPER(v2g.rsID) AND v.trait = v2g.trait
+                INNER JOIN read_parquet('{GENES_PARQUET}') g
+                    ON UPPER(g.GENE) = UPPER(v2g.Gene) AND g.trait = v.trait
+                WHERE UPPER(v2g.Gene) = UPPER(?)
+                  AND v.PROBABILITY >= ?
+                  AND g.PROBABILITY >= ?
+                  AND v2g.Value >= ?
+            )
+            SELECT
+                r.annotation, r.tissue, r.tissue_from_file,
+                SUM(fv.v2g_value) AS signature_value
+            FROM filtered_variants fv
+            INNER JOIN genomic_regions r
+                ON fv.abs_pos >= r.abs_start AND fv.abs_pos <= r.abs_end
+            GROUP BY r.annotation, r.tissue, r.tissue_from_file
+            ORDER BY signature_value DESC
+        """
+        df = app.state.db.execute(var_query, [gene_name, threshold, threshold, threshold]).df()
+        return df.to_dict(orient="records")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.error(f"Error in gene tissue_signature: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
