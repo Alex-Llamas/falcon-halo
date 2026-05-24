@@ -16,6 +16,7 @@ ANTS_FOLDER = os.getenv("ANTS_FOLDER", "/humgen/diabetes/loki/data/annotation/co
 GENES_PARQUET = str(Path(PARQUET_DIR) / "genes.parquet/**/*.parquet")
 VARIANTS_PARQUET = str(Path(PARQUET_DIR) / "variants.parquet/**/*.parquet")
 V2G_PARQUET = str(Path(PARQUET_DIR) / "v2g.parquet/**/*.parquet")
+PRECOMPUTED_SIGNATURES_PARQUET = str(Path(PARQUET_DIR) / "precomputed_signatures/**/*.parquet")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -428,6 +429,54 @@ async def get_gene_tissue_signature(
         raise
     except Exception as e:
         logging.error(f"Error in gene tissue_signature: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/v1/precomputed_signatures/gene/{gene_name}")
+async def get_precomputed_signatures(
+    gene_name: str,
+    trait: Optional[str] = None,
+    annotation: Optional[str] = None,
+    aggregation: str = Query("sum", pattern="^(sum|avg|max)$")
+):
+    try:
+        if trait:
+            # Per trait API
+            query = f"""
+                SELECT
+                    trait,
+                    annotation,
+                    tissue,
+                    value AS signature_value
+                FROM read_parquet('{PRECOMPUTED_SIGNATURES_PARQUET}', hive_partitioning=1)
+                WHERE UPPER(gene) = UPPER(?) AND UPPER(trait) = UPPER(?)
+            """
+            params = [gene_name, trait]
+            if annotation and annotation != "All":
+                query += " AND UPPER(annotation) = UPPER(?)"
+                params.append(annotation)
+        else:
+            # Aggregated API
+            agg_func = aggregation.upper()
+            query = f"""
+                SELECT
+                    annotation,
+                    tissue,
+                    {agg_func}(value) AS signature_value
+                FROM read_parquet('{PRECOMPUTED_SIGNATURES_PARQUET}', hive_partitioning=1)
+                WHERE UPPER(gene) = UPPER(?)
+            """
+            params = [gene_name]
+            if annotation and annotation != "All":
+                query += " AND UPPER(annotation) = UPPER(?)"
+                params.append(annotation)
+            query += " GROUP BY annotation, tissue"
+
+        df = app.state.db.execute(query, params).df()
+        if df.empty:
+             return []
+        return df.to_dict(orient="records")
+    except Exception as e:
+        logging.error(f"Error in precomputed_signatures: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 # Serve static files from the frontend directory
