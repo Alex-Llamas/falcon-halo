@@ -446,7 +446,7 @@ async def get_precomputed_signatures(
                     trait,
                     annotation,
                     tissue,
-                    value AS signature_value
+                    SUM(value) AS signature_value
                 FROM read_parquet('{PRECOMPUTED_SIGNATURES_PARQUET}', hive_partitioning=1)
                 WHERE UPPER(gene) = UPPER(?) AND UPPER(trait) = UPPER(?)
             """
@@ -454,6 +454,7 @@ async def get_precomputed_signatures(
             if annotation and annotation != "All":
                 query += " AND UPPER(annotation) = UPPER(?)"
                 params.append(annotation)
+            query += " GROUP BY trait, annotation, tissue"
         else:
             # Aggregated API
             agg_func = aggregation.upper()
