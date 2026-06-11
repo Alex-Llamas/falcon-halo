@@ -93,6 +93,13 @@ def main():
         try:
             df = pd.read_csv(tsv_path, sep='\t')
 
+            # Force START and POS to be numeric if they exist, coercing errors to NaN
+            # so SQLite inherently understands them as integers/floats for numerical sorting.
+            if 'START' in df.columns:
+                df['START'] = pd.to_numeric(df['START'], errors='coerce')
+            if 'POS' in df.columns:
+                df['POS'] = pd.to_numeric(df['POS'], errors='coerce')
+
             # Apply Specific Logic per File Type
             if file_type == "genes":
                 if 'PROBABILITY' in df.columns and 'P_VALUE' in df.columns:
@@ -177,17 +184,17 @@ def main():
     print("\nPhase 3: Exporting to JSON files...")
 
     if file_type == "genes":
-        write_sorted_json('GENE', file1_path)
-        write_sorted_json('trait', file2_path)
-        write_sorted_json('trait, CHR, START', file3_path)
+        write_sorted_json('GENE ASC', file1_path)
+        write_sorted_json('trait ASC', file2_path)
+        write_sorted_json('trait ASC, CHR ASC, START ASC', file3_path)
     elif file_type == "variants":
-        write_sorted_json('RSID', file1_path)
-        write_sorted_json('trait', file2_path)
-        write_sorted_json('trait, CHR, POS', file3_path)
+        write_sorted_json('RSID ASC', file1_path)
+        write_sorted_json('trait ASC', file2_path)
+        write_sorted_json('trait ASC, CHR ASC, POS ASC', file3_path)
     elif file_type == "v2g":
-        write_sorted_json('rsID', rsid_path)
-        write_sorted_json('Gene', gene_path)
-        write_sorted_json('trait', file2_path)
+        write_sorted_json('rsID ASC', rsid_path)
+        write_sorted_json('Gene ASC', gene_path)
+        write_sorted_json('trait ASC', file2_path)
 
     # Cleanup
     conn.close()
