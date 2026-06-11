@@ -17,16 +17,28 @@ def main():
     parser.add_option("", "--output", help="Prefix for all output files.")
     parser.add_option("", "--target-file", default="pegs1.wg.genes", help="Name of the TSV file to read for each trait")
 
-    # Threshold options (updated to match your request)
+    # Threshold options
     parser.add_option("", "--gene_pp_th", type='float', default=0.01,
-                      help="keep genes with Probability higher than threshold")
-    parser.add_option("", "--gene_p_th", type='float', default=1.0, help="keep genes with P-Value less than threshold")
+                      help="keep records with Probability/Value higher than threshold")
+    parser.add_option("", "--gene_p_th", type='float', default=1.0,
+                      help="keep records with P-Value less than threshold")
 
     (options, _) = parser.parse_args()
 
     # Validate required base arguments
     if not options.falcon_prefix or not options.output:
         parser.error("Both --falcon-prefix and --output are required.")
+
+    # Determine file type based on target_file extension
+    target_file = options.target_file
+    if target_file.endswith(".wg.genes"):
+        file_type = "genes"
+    elif target_file.endswith(".wg.variants"):
+        file_type = "variants"
+    elif target_file.endswith(".wg.v2g"):
+        file_type = "v2g"
+    else:
+        parser.error("Unsupported target-file extension. Supported extensions are: *.wg.genes, *.wg.variants, *.wg.v2g")
 
     # Determine the list of traits
     if len(options.traits) > 0:
@@ -35,19 +47,34 @@ def main():
         list_of_traits = sorted([d for d in os.listdir(options.falcon_prefix)
                                  if os.path.isdir(os.path.join(options.falcon_prefix, d)) and not d.startswith('.')])
 
-    # File paths
-    file1_path = options.output + ".gene_sorted.jsonl"
-    file2_path = options.output + ".trait_sorted.jsonl"
-    db_path = options.output + "_temp_aggregation.db"
+    # Dynamic File Paths setup
+    output_files = []
+    file2_path = f"{options.output}.trait_sorted.json"
+    output_files.append(file2_path)
+
+    if file_type == "genes":
+        file1_path = f"{options.output}.GENE_sorted.json"
+        file3_path = f"{options.output}.region_sorted.json"
+        output_files.extend([file1_path, file3_path])
+    elif file_type == "variants":
+        file1_path = f"{options.output}.RSID_sorted.json"
+        file3_path = f"{options.output}.region_sorted.json"
+        output_files.extend([file1_path, file3_path])
+    elif file_type == "v2g":
+        rsid_path = f"{options.output}.RSID_sorted.json"
+        gene_path = f"{options.output}.GENE_sorted.json"
+        output_files.extend([rsid_path, gene_path])
+
+    db_path = f"{options.output}_temp_aggregation.db"
 
     # Remove existing files to prevent appending to old data
-    for path in [file1_path, file2_path, db_path]:
+    for path in output_files + [db_path]:
         if os.path.exists(path):
             os.remove(path)
 
     # Initialize SQLite database connection
     conn = sqlite3.connect(db_path)
-    table_name = "genes_data"
+    table_name = "data_table"
 
     print('Phase 1: Processing and filtering data per trait into temp database...')
     total_start_time = time.time()
@@ -64,16 +91,24 @@ def main():
             continue
 
         try:
-            # Read only the necessary columns to save memory during read (optional but recommended)
-            # If you want all columns, you can remove the `usecols` argument.
             df = pd.read_csv(tsv_path, sep='\t')
 
-            # Apply Filters
-            # Ensure columns exist before filtering to avoid KeyErrors
-            if 'PROBABILITY' in df.columns and 'P_VALUE' in df.columns:
-                df = df[(df['PROBABILITY'] > options.gene_pp_th) & (df['P_VALUE'] < options.gene_p_th)]
-            else:
-                print(f"Warning: Expected columns missing in {trait}. Skipping filtering.")
+            # Apply Specific Logic per File Type
+            if file_type == "genes":
+                if 'PROBABILITY' in df.columns and 'P_VALUE' in df.columns:
+                    df = df[(df['PROBABILITY'] > options.gene_pp_th) & (df['P_VALUE'] < options.gene_p_th)]
+                else:
+                    print(f"Warning: Expected columns missing in {trait}. Skipping filtering.")
+            elif file_type == "variants":
+                if 'PROBABILITY' in df.columns:
+                    df = df[df['PROBABILITY'] > options.gene_pp_th]
+                else:
+                    print(f"Warning: 'PROBABILITY' missing in {trait}. Skipping filtering.")
+            elif file_type == "v2g":
+                if 'Value' in df.columns:
+                    df = df[df['Value'] > options.gene_pp_th]
+                else:
+                    print(f"Warning: 'Value' missing in {trait}. Skipping filtering.")
 
             if df.empty:
                 print(f"Trait {trait} skipped: No rows passed the thresholds.")
@@ -98,7 +133,8 @@ def main():
     if rows_inserted == 0:
         print("No valid data was aggregated. Exiting.")
         conn.close()
-        os.remove(db_path)
+        if os.path.exists(db_path):
+            os.remove(db_path)
         exit(1)
 
     print(f"\nPhase 1 Complete. {rows_inserted} total rows aggregated in {time.time() - total_start_time:.2f} seconds.")
@@ -106,32 +142,52 @@ def main():
     # Phase 2: Indexing the database to make sorting fast
     print("\nPhase 2: Building database indexes for rapid sorting...")
     cursor = conn.cursor()
-    cursor.execute(f"CREATE INDEX idx_gene ON {table_name}(GENE);")
     cursor.execute(f"CREATE INDEX idx_trait ON {table_name}(trait);")
+
+    if file_type == "genes":
+        cursor.execute(f"CREATE INDEX idx_gene ON {table_name}(GENE);")
+        cursor.execute(f"CREATE INDEX idx_region ON {table_name}(trait, CHR, START);")
+    elif file_type == "variants":
+        cursor.execute(f"CREATE INDEX idx_rsid ON {table_name}(RSID);")
+        cursor.execute(f"CREATE INDEX idx_region ON {table_name}(trait, CHR, POS);")
+    elif file_type == "v2g":
+        cursor.execute(f"CREATE INDEX idx_rsid ON {table_name}(rsID);")
+        cursor.execute(f"CREATE INDEX idx_gene ON {table_name}(Gene);")
+
     conn.commit()
 
-    # Helper function to query the DB and write to JSONL in chunks
-    def write_sorted_jsonl(order_by_col, output_filepath):
+    # Helper function to query the DB and write to JSON lines
+    def write_sorted_json(order_by_col, output_filepath):
         print(f"Generating sorted file: {output_filepath} (Ordered by {order_by_col})")
         export_start = time.time()
-
-        # Using Pandas to read from SQLite in chunks to avoid memory spikes
         query = f"SELECT * FROM {table_name} ORDER BY {order_by_col}"
 
-        # Open the file in write mode
         with open(output_filepath, 'w', encoding='utf-8') as f:
-            for chunk in pd.read_sql_query(query, conn, chunksize=50000):
-                # Write the chunk to the file as JSON lines
-                chunk.to_json(f, orient='records', lines=True)
-                # Ensure a newline is present after the chunk (pandas .to_json doesn't append trailing newline)
-                f.write('\n')
+            for i, chunk in enumerate(pd.read_sql_query(query, conn, chunksize=50000)):
+                chunk_str = chunk.to_json(orient='records', lines=True)
+                if chunk_str:
+                    # Prevent empty lines by only prefixing newlines after the first chunk
+                    if i > 0:
+                        f.write('\n')
+                    f.write(chunk_str)
 
         print(f"Finished {output_filepath} in {time.time() - export_start:.2f} seconds.")
 
     # Phase 3: Export the sorted data
-    print("\nPhase 3: Exporting to JSONL files...")
-    write_sorted_jsonl('GENE', file1_path)
-    write_sorted_jsonl('trait', file2_path)
+    print("\nPhase 3: Exporting to JSON files...")
+
+    if file_type == "genes":
+        write_sorted_json('GENE', file1_path)
+        write_sorted_json('trait', file2_path)
+        write_sorted_json('trait, CHR, START', file3_path)
+    elif file_type == "variants":
+        write_sorted_json('RSID', file1_path)
+        write_sorted_json('trait', file2_path)
+        write_sorted_json('trait, CHR, POS', file3_path)
+    elif file_type == "v2g":
+        write_sorted_json('rsID', rsid_path)
+        write_sorted_json('Gene', gene_path)
+        write_sorted_json('trait', file2_path)
 
     # Cleanup
     conn.close()
