@@ -169,14 +169,22 @@ def main():
         export_start = time.time()
         query = f"SELECT * FROM {table_name} ORDER BY {order_by_col}"
 
+        first_write = True
         with open(output_filepath, 'w', encoding='utf-8') as f:
-            for i, chunk in enumerate(pd.read_sql_query(query, conn, chunksize=50000)):
-                chunk_str = chunk.to_json(orient='records', lines=True)
+            for chunk in pd.read_sql_query(query, conn, chunksize=50000):
+
+                # Convert NaNs to None so json.dumps generates valid JSON 'null'
+                chunk = chunk.astype(object).where(pd.notnull(chunk), None)
+                records = chunk.to_dict(orient='records')
+
+                # Use Python's native json.dumps to preserve exact float representations
+                chunk_str = '\n'.join(json.dumps(record) for record in records)
+
                 if chunk_str:
-                    # Prevent empty lines by only prefixing newlines after the first chunk
-                    if i > 0:
+                    if not first_write:
                         f.write('\n')
                     f.write(chunk_str)
+                    first_write = False
 
         print(f"Finished {output_filepath} in {time.time() - export_start:.2f} seconds.")
 
